@@ -1,29 +1,33 @@
-import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 import { z } from "zod";
-import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import type { PhraseCluster } from "./types";
 
 const ClusterSchema = z.object({
   clusters: z
     .array(
       z.object({
-        name: z.string().describe("Krótka nazwa tematu klastra, np. 'Pielęgnacja trawnika'"),
-        mainPhrase: z
-          .string()
-          .describe("Fraza główna klastra - najbardziej reprezentatywna, o najszerszym zasięgu"),
-        phrases: z
-          .array(z.string())
-          .min(1)
-          .describe("Wszystkie frazy wejściowe należące do tego klastra, dokładnie jak podane na wejściu"),
+        name: z.string(),
+        mainPhrase: z.string(),
+        phrases: z.array(z.string()).min(1),
       }),
     )
     .min(1),
 });
 
+const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+const DEFAULT_MODEL = "anthropic/claude-opus-5";
+
 export class SemanticClusteringUnavailableError extends Error {}
 
 export function isSemanticClusteringAvailable(): boolean {
-  return Boolean(process.env.ANTHROPIC_API_KEY);
+  return Boolean(process.env.OPENROUTER_API_KEY);
+}
+
+function getClient(): OpenAI {
+  return new OpenAI({
+    apiKey: process.env.OPENROUTER_API_KEY,
+    baseURL: OPENROUTER_BASE_URL,
+  });
 }
 
 export async function clusterSemantically(
@@ -32,11 +36,12 @@ export async function clusterSemantically(
 ): Promise<PhraseCluster[]> {
   if (!isSemanticClusteringAvailable()) {
     throw new SemanticClusteringUnavailableError(
-      "Brak skonfigurowanego ANTHROPIC_API_KEY - grupowanie semantyczne jest niedostępne.",
+      "Brak skonfigurowanego OPENROUTER_API_KEY - grupowanie semantyczne jest niedostępne.",
     );
   }
 
-  const client = new Anthropic();
+  const client = getClient();
+  const model = process.env.OPENROUTER_MODEL?.trim() || DEFAULT_MODEL;
 
   const numberedPhrases = phrases.map((phrase, i) => `${i + 1}. ${phrase}`).join("\n");
 
@@ -44,35 +49,46 @@ export async function clusterSemantically(
     ? `Kontekst strony/tematu, dla której tworzysz grupowanie: "${pageContext.trim()}". Grupuj i nazywaj klastry tak, aby były trafne względem tego kontekstu.`
     : "Nie podano dodatkowego kontekstu strony - grupuj wyłącznie na podstawie znaczenia fraz.";
 
-  const response = await client.messages.parse({
-    model: "claude-opus-5",
-    max_tokens: 16000,
-    output_config: {
-      format: zodOutputFormat(ClusterSchema),
-      effort: "medium",
-    },
-    system:
-      "Jesteś ekspertem SEO specjalizującym się w grupowaniu fraz kluczowych w klastry/silosy tematyczne " +
-      "na potrzeby planowania treści i architektury informacji serwisu. Grupujesz frazy według intencji " +
-      "wyszukiwania i znaczenia semantycznego, nie tylko wspólnych słów. Każda fraza z wejścia musi trafić " +
-      "do dokładnie jednego klastra, zachowana w oryginalnym brzmieniu. Liczba klastrów powinna być rozsądna " +
-      "- unikaj zarówno jednego wielkiego klastra, jak i osobnego klastra dla każdej frazy; łącz frazy, które " +
-      "realnie odpowiadają na to samo zapytanie użytkownika lub temat podstrony.",
+  const systemPrompt =
+    "Jesteś ekspertem SEO specjalizującym się w grupowaniu fraz kluczowych w klastry/silosy tematyczne " +
+    "na potrzeby planowania treści i architektury informacji serwisu. Grupujesz frazy według intencji " +
+    "wyszukiwania i znaczenia semantycznego, nie tylko wspólnych słów. Każda fraza z wejścia musi trafić " +
+    "do dokładnie jednego klastra, zachowana w oryginalnym brzmieniu. Liczba klastrów powinna być rozsądna " +
+    "- unikaj zarówno jednego wielkiego klastra, jak i osobnego klastra dla każdej frazy; łącz frazy, które " +
+    "realnie odpowiadają na to samo zapytanie użytkownika lub temat podstrony.\n\n" +
+    "Odpowiedz WYŁĄCZNIE poprawnym obiektem JSON, bez markdown i bez komentarzy, dokładnie w formacie:\n" +
+    '{"clusters":[{"name":"nazwa klastra","mainPhrase":"fraza główna","phrases":["fraza 1","fraza 2"]}]}';
+
+  const response = await client.chat.completions.create({
+    model,
+    response_format: { type: "json_object" },
     messages: [
+      { role: "system", content: systemPrompt },
       {
         role: "user",
-        content:
-          `${contextLine}\n\nPogrupuj poniższe frazy kluczowe w klastry tematyczne:\n\n${numberedPhrases}`,
+        content: `${contextLine}\n\nPogrupuj poniższe frazy kluczowe w klastry tematyczne:\n\n${numberedPhrases}`,
       },
     ],
   });
 
-  const parsed = response.parsed_output;
-  if (!parsed) {
-    throw new Error("Claude nie zwrócił poprawnie sformatowanego wyniku grupowania.");
+  const content = response.choices[0]?.message?.content;
+  if (!content) {
+    throw new Error("Model nie zwrócił żadnej odpowiedzi.");
   }
 
-  return reconcileWithInput(parsed.clusters, phrases);
+  let raw: unknown;
+  try {
+    raw = JSON.parse(content);
+  } catch {
+    throw new Error("Model nie zwrócił poprawnego JSON-a.");
+  }
+
+  const parsed = ClusterSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new Error("Odpowiedź modelu nie pasuje do oczekiwanego formatu grupowania.");
+  }
+
+  return reconcileWithInput(parsed.data.clusters, phrases);
 }
 
 // Defensive pass: the model is instructed to preserve every input phrase

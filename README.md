@@ -7,8 +7,9 @@ Dostępne są dwie metody grupowania:
 
 - **Leksykalna** - działa w pełni offline, bez klucza API. Grupuje frazy na podstawie
   wspólnych znaczących słów (podobieństwo Jaccarda).
-- **Semantyczna (AI)** - wykorzystuje Claude do grupowania po znaczeniu i intencji
-  wyszukiwania, nie tylko wspólnych słowach. Wymaga klucza `ANTHROPIC_API_KEY`.
+- **Semantyczna (AI)** - wykorzystuje model Claude (przez OpenRouter) do grupowania po
+  znaczeniu i intencji wyszukiwania, nie tylko wspólnych słowach. Wymaga klucza
+  `OPENROUTER_API_KEY`.
 
 ## Uruchomienie
 
@@ -21,15 +22,21 @@ Otwórz [http://localhost:3000](http://localhost:3000).
 
 ## Konfiguracja grupowania semantycznego (opcjonalnie)
 
-Skopiuj `.env.example` do `.env.local` i uzupełnij klucz API:
+Grupowanie semantyczne przechodzi przez [OpenRouter](https://openrouter.ai/keys)
+(API kompatybilne z OpenAI), a nie bezpośrednio przez Anthropic. Skopiuj
+`.env.example` do `.env.local` i uzupełnij klucz:
 
 ```bash
 cp .env.example .env.local
 ```
 
 ```
-ANTHROPIC_API_KEY=sk-ant-...
+OPENROUTER_API_KEY=sk-or-...
+OPENROUTER_MODEL=anthropic/claude-opus-5
 ```
+
+`OPENROUTER_MODEL` jest opcjonalny (domyślnie `anthropic/claude-opus-5`) - można
+podać dowolny slug modelu dostępny na OpenRouter, np. `anthropic/claude-sonnet-5`.
 
 Bez klucza aplikacja nadal działa - dostępna jest wtedy tylko metoda leksykalna.
 
@@ -39,4 +46,4 @@ Bez klucza aplikacja nadal działa - dostępna jest wtedy tylko metoda leksykaln
 - `src/app/api/cluster/route.ts` - endpoint API (`GET` sprawdza dostępność metody
   semantycznej, `POST` wykonuje grupowanie)
 - `src/lib/lexicalClustering.ts` - grupowanie leksykalne (offline)
-- `src/lib/semanticClustering.ts` - grupowanie semantyczne przez Claude API
+- `src/lib/semanticClustering.ts` - grupowanie semantyczne przez OpenRouter

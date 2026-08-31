@@ -151,7 +151,7 @@ export default function Home() {
                 <span className="block font-medium">Semantyczne (AI)</span>
                 <span className="block text-xs text-black/50 dark:text-white/50">
                   {semanticAvailable === false
-                    ? "Wymaga ustawienia ANTHROPIC_API_KEY na serwerze."
+                    ? "Wymaga ustawienia OPENROUTER_API_KEY na serwerze."
                     : "Grupuje po znaczeniu i intencji wyszukiwania, nie tylko słowach."}
                 </span>
               </span>
