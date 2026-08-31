@@ -22,10 +22,15 @@ export async function GET() {
   return NextResponse.json({ semanticAvailable: isSemanticClusteringAvailable() });
 }
 
-async function runClustering(method: "lexical" | "semantic", phrases: string[], pageContext?: string) {
+async function runClustering(
+  method: "lexical" | "semantic",
+  phrases: string[],
+  pageContext: string | undefined,
+  contentKind: "phrases" | "pages",
+) {
   return method === "semantic"
-    ? clusterSemantically(phrases, pageContext)
-    : clusterLexically(phrases);
+    ? clusterSemantically(phrases, pageContext, contentKind)
+    : clusterLexically(phrases, { longDocuments: contentKind === "pages" });
 }
 
 export async function POST(request: Request) {
@@ -79,7 +84,7 @@ async function handlePhrasesMode(
     );
   }
 
-  const clusters = await runClustering(method, phrases, pageContext);
+  const clusters = await runClustering(method, phrases, pageContext, "phrases");
   const responseBody: ClusterResponse = { method, clusters };
   return NextResponse.json(responseBody);
 }
@@ -101,24 +106,30 @@ async function handleCrawlMode(
     );
   }
 
-  // Multiple pages can share the same title - keep the full URL list per
-  // phrase so no discovered page is silently dropped from the result.
-  const urlsByPhrase = new Map<string, string[]>();
+  // Clustering reasons over each page's content signal (title + meta
+  // description + headings), not its bare title - but the UI and CSV
+  // export still show the short label. Multiple pages can end up with an
+  // identical signal (rare, e.g. near-duplicate content), so keep the full
+  // list per signal rather than assuming a 1:1 mapping.
+  const pagesBySignal = new Map<string, { label: string; url: string }[]>();
   for (const page of crawl.pages) {
-    const urls = urlsByPhrase.get(page.title) ?? [];
-    urls.push(page.url);
-    urlsByPhrase.set(page.title, urls);
+    const entries = pagesBySignal.get(page.signal) ?? [];
+    entries.push({ label: page.label, url: page.url });
+    pagesBySignal.set(page.signal, entries);
   }
 
-  const phrases = Array.from(urlsByPhrase.keys());
-  const rawClusters = await runClustering(method, phrases, pageContext || siteUrl.trim());
+  const signals = Array.from(pagesBySignal.keys());
+  const rawClusters = await runClustering(method, signals, pageContext || siteUrl.trim(), "pages");
 
-  const clusters: PhraseCluster[] = rawClusters.map((cluster) => ({
-    ...cluster,
-    pages: cluster.phrases.flatMap((phrase) =>
-      (urlsByPhrase.get(phrase) ?? []).map((url) => ({ phrase, url })),
-    ),
-  }));
+  const clusters: PhraseCluster[] = rawClusters.map((cluster) => {
+    const pages = cluster.phrases.flatMap((signal) =>
+      (pagesBySignal.get(signal) ?? []).map((entry) => ({ phrase: entry.label, url: entry.url })),
+    );
+    const displayPhrases = Array.from(new Set(pages.map((p) => p.phrase)));
+    const mainPhrase = pagesBySignal.get(cluster.mainPhrase)?.[0]?.label ?? displayPhrases[0] ?? cluster.mainPhrase;
+
+    return { name: cluster.name, mainPhrase, phrases: displayPhrases, pages };
+  });
 
   const responseBody: ClusterResponse = {
     method,

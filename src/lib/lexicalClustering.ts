@@ -29,6 +29,23 @@ function jaccard(a: Set<string>, b: Set<string>): number {
   return union === 0 ? 0 : intersection / union;
 }
 
+// |A∩B| / min(|A|,|B|): "how much of the smaller set is contained in the
+// larger one". Jaccard's union-sized denominator makes it too strict once
+// one side is much bigger than the other (a whole page's title + meta +
+// headings vs. another page's) - a short document sharing every one of its
+// words with a much longer one still scores low, purely because the long
+// side has many more unique words. Only worth the tradeoff for that
+// size-imbalanced case: on same-length short phrases it swings the other
+// way and over-merges (a single shared word out of a 2-word phrase already
+// scores 0.5), so it's opt-in via clusterLexically's `longDocuments` flag,
+// not a blanket replacement for jaccard().
+function overlapCoefficient(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let intersection = 0;
+  for (const token of a) if (b.has(token)) intersection++;
+  return intersection / Math.min(a.size, b.size);
+}
+
 // Two phrases are linked (same cluster) once they share enough of their
 // significant words.
 const SIMILARITY_THRESHOLD = 0.24;
@@ -43,14 +60,18 @@ interface ClusterNode {
 // chains unrelated phrases together transitively (A-B and B-C linked makes
 // A-C the same cluster even if unrelated); averaging over every member pair
 // avoids that chaining effect.
-export function clusterLexically(phrases: string[]): PhraseCluster[] {
+export function clusterLexically(
+  phrases: string[],
+  options: { longDocuments?: boolean } = {},
+): PhraseCluster[] {
+  const similarity = options.longDocuments ? overlapCoefficient : jaccard;
   const n = phrases.length;
   const tokenSets = phrases.map((phrase) => new Set(tokenize(phrase)));
 
   const active = new Map<number, ClusterNode>();
   for (let i = 0; i < n; i++) active.set(i, { members: [i] });
 
-  // sumSim[a][b] = sum of jaccard(tokenSets[i], tokenSets[j]) over all
+  // sumSim[a][b] = sum of similarity(tokenSets[i], tokenSets[j]) over all
   // original-phrase pairs (i, j) with i in cluster a, j in cluster b.
   const sumSim = new Map<number, Map<number, number>>();
   const setSim = (a: number, b: number, v: number) => {
@@ -63,7 +84,7 @@ export function clusterLexically(phrases: string[]): PhraseCluster[] {
 
   for (let i = 0; i < n; i++) {
     for (let j = i + 1; j < n; j++) {
-      setSim(i, j, jaccard(tokenSets[i], tokenSets[j]));
+      setSim(i, j, similarity(tokenSets[i], tokenSets[j]));
     }
   }
 

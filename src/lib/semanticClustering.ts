@@ -33,6 +33,7 @@ function getClient(): OpenAI {
 export async function clusterSemantically(
   phrases: string[],
   pageContext?: string,
+  contentKind: "phrases" | "pages" = "phrases",
 ): Promise<PhraseCluster[]> {
   if (!isSemanticClusteringAvailable()) {
     throw new SemanticClusteringUnavailableError(
@@ -49,15 +50,29 @@ export async function clusterSemantically(
     ? `Kontekst strony/tematu, dla której tworzysz grupowanie: "${pageContext.trim()}". Grupuj i nazywaj klastry tak, aby były trafne względem tego kontekstu.`
     : "Nie podano dodatkowego kontekstu strony - grupuj wyłącznie na podstawie znaczenia fraz.";
 
+  const subjectDescription =
+    contentKind === "pages"
+      ? "Każdy poniższy element to podsumowanie treści JEDNEJ realnej podstrony istniejącej witryny " +
+        "(tytuł, meta description i nagłówki H1-H3, oddzielone znakiem „ · ”), a nie dosłowna fraza z " +
+        "wyszukiwarki. Przeanalizuj treść każdej podstrony osobno i pogrupuj podstrony wg tematu, jakiego " +
+        "faktycznie dotyczą - nie kieruj się tylko powtarzającymi się frazami marketingowymi z meta description."
+      : "Grupujesz frazy kluczowe wpisywane w wyszukiwarkę.";
+
   const systemPrompt =
-    "Jesteś ekspertem SEO specjalizującym się w grupowaniu fraz kluczowych w klastry/silosy tematyczne " +
-    "na potrzeby planowania treści i architektury informacji serwisu. Grupujesz frazy według intencji " +
-    "wyszukiwania i znaczenia semantycznego, nie tylko wspólnych słów. Każda fraza z wejścia musi trafić " +
-    "do dokładnie jednego klastra, zachowana w oryginalnym brzmieniu. Liczba klastrów powinna być rozsądna " +
-    "- unikaj zarówno jednego wielkiego klastra, jak i osobnego klastra dla każdej frazy; łącz frazy, które " +
-    "realnie odpowiadają na to samo zapytanie użytkownika lub temat podstrony.\n\n" +
-    "Odpowiedz WYŁĄCZNIE poprawnym obiektem JSON, bez markdown i bez komentarzy, dokładnie w formacie:\n" +
+    "Jesteś ekspertem SEO specjalizującym się w grupowaniu treści w klastry/silosy tematyczne " +
+    "na potrzeby planowania treści i architektury informacji serwisu. " +
+    subjectDescription +
+    " Grupujesz według intencji wyszukiwania i znaczenia semantycznego, nie tylko wspólnych słów. Każdy " +
+    "element z wejścia musi trafić do dokładnie jednego klastra, zachowany w oryginalnym brzmieniu. Liczba " +
+    "klastrów powinna być rozsądna - unikaj zarówno jednego wielkiego klastra, jak i osobnego klastra dla " +
+    "każdego elementu; łącz te, które realnie odpowiadają na to samo zapytanie użytkownika lub temat podstrony." +
+    "\n\nOdpowiedz WYŁĄCZNIE poprawnym obiektem JSON, bez markdown i bez komentarzy, dokładnie w formacie:\n" +
     '{"clusters":[{"name":"nazwa klastra","mainPhrase":"fraza główna","phrases":["fraza 1","fraza 2"]}]}';
+
+  const taskLine =
+    contentKind === "pages"
+      ? "Pogrupuj poniższe podstrony (podsumowania ich treści) w klastry tematyczne"
+      : "Pogrupuj poniższe frazy kluczowe w klastry tematyczne";
 
   const response = await client.chat.completions.create({
     model,
@@ -66,7 +81,7 @@ export async function clusterSemantically(
       { role: "system", content: systemPrompt },
       {
         role: "user",
-        content: `${contextLine}\n\nPogrupuj poniższe frazy kluczowe w klastry tematyczne:\n\n${numberedPhrases}`,
+        content: `${contextLine}\n\n${taskLine}:\n\n${numberedPhrases}`,
       },
     ],
   });

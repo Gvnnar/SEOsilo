@@ -2,6 +2,7 @@ import { safeFetch, assertPublicHttpUrl, SsrfBlockedError } from "./urlSafety";
 import {
   extractLinks,
   extractPageSignal,
+  buildClusteringText,
   labelFromUrlSlug,
   parseSitemapLocs,
   parseRobotsDisallow,
@@ -11,7 +12,13 @@ import {
 
 export interface DiscoveredPage {
   url: string;
-  title: string;
+  // Short, human-readable label (title, falling back to H1 or URL slug) -
+  // what the UI shows and what CSV export uses.
+  label: string;
+  // Richer per-page text (title + meta description + H1-H3 headings) that
+  // clustering actually reasons over, so pages get analyzed individually
+  // rather than grouped from the title alone.
+  signal: string;
 }
 
 export interface CrawlResult {
@@ -132,9 +139,10 @@ export async function discoverPages(siteUrlInput: string): Promise<CrawlResult> 
     try {
       const res = await safeFetch(url, { timeoutMs: PAGE_FETCH_TIMEOUT_MS });
       if (!res.ok) return null;
-      const { title, h1 } = extractPageSignal(res.text);
-      const label = title || h1 || labelFromUrlSlug(res.finalUrl);
-      return { url: res.finalUrl, title: label } satisfies DiscoveredPage;
+      const pageSignal = extractPageSignal(res.text);
+      const label = pageSignal.title || pageSignal.h1 || labelFromUrlSlug(res.finalUrl);
+      const signal = buildClusteringText(pageSignal) || label;
+      return { url: res.finalUrl, label, signal } satisfies DiscoveredPage;
     } catch {
       return null;
     }

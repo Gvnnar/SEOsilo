@@ -8,7 +8,9 @@ Dwa źródła danych wejściowych:
 - **Wklej frazy** - ręcznie wklejona lista fraz (np. z keyword researchu).
 - **Podaj URL strony** - podajesz tylko URL strony głównej, a narzędzie samo wykrywa
   istniejące podstrony (przez `sitemap.xml`, a jeśli go brak - przez linki ze strony
-  głównej, z poszanowaniem `robots.txt`) i grupuje je wg tytułów. Przydatne, gdy chcesz
+  głównej, z poszanowaniem `robots.txt`). Każda podstrona jest analizowana osobno - do
+  grupowania trafia tytuł, meta description i nagłówki H1-H3, a nie sam tytuł - i dopiero
+  ten bogatszy sygnał treści decyduje o przydziale do klastra. Przydatne, gdy chcesz
   poukładać w silosy treść, która już istnieje na stronie. Bez zewnętrznego API - strona
   jest pobierana bezpośrednio z serwera aplikacji (z zabezpieczeniem przed SSRF: blokadą
   adresów prywatnych/loopback/link-local, ręczną walidacją przekierowań i limitem rozmiaru
@@ -16,8 +18,10 @@ Dwa źródła danych wejściowych:
 
 Dostępne są dwie metody grupowania:
 
-- **Leksykalna** - działa w pełni offline, bez klucza API. Grupuje frazy na podstawie
-  wspólnych znaczących słów (podobieństwo Jaccarda).
+- **Leksykalna** - działa w pełni offline, bez klucza API. Grupuje na podstawie wspólnych
+  znaczących słów (dla wklejonych fraz: podobieństwo Jaccarda; dla treści podstron: mocno
+  różniące się długością sygnały wymagają innej metryki - współczynnika nakładania, żeby
+  długi zestaw nagłówków nie zaniżał sztucznie podobieństwa do krótszej strony).
 - **Semantyczna (AI)** - wykorzystuje model Claude (przez OpenRouter) do grupowania po
   znaczeniu i intencji wyszukiwania, nie tylko wspólnych słowach. Wymaga klucza
   `OPENROUTER_API_KEY`.

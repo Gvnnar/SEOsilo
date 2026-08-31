@@ -32,14 +32,51 @@ export function extractLinks(html: string, baseUrl: string): string[] {
 export interface PageSignal {
   title: string;
   h1: string;
+  metaDescription: string;
+  // <h1>-<h3> text, in document order, trimmed and deduplicated.
+  headings: string[];
 }
 
-// Best available label for a page: <title>, falling back to the first <h1>.
+function normalizeText(text: string): string {
+  return text.trim().replace(/\s+/g, " ");
+}
+
+// Everything on the page worth analyzing beyond the bare title: meta
+// description and the H1-H3 heading structure, which sketch what the page
+// actually covers even when the <title> is generic or SEO-stuffed.
 export function extractPageSignal(html: string): PageSignal {
   const $ = cheerio.load(html);
-  const title = $("title").first().text().trim().replace(/\s+/g, " ");
-  const h1 = $("h1").first().text().trim().replace(/\s+/g, " ");
-  return { title, h1 };
+  const title = normalizeText($("title").first().text());
+  const h1 = normalizeText($("h1").first().text());
+  const metaDescription = normalizeText($('meta[name="description"]').first().attr("content") ?? "");
+
+  const seen = new Set<string>();
+  const headings: string[] = [];
+  $("h1, h2, h3").each((_, el) => {
+    const text = normalizeText($(el).text());
+    if (text && !seen.has(text)) {
+      seen.add(text);
+      headings.push(text);
+    }
+  });
+
+  return { title, h1, metaDescription, headings };
+}
+
+const MAX_SIGNAL_CHARS = 500;
+
+// Builds the compact per-page text actually used for clustering: title,
+// meta description and heading structure joined on one line (never a raw
+// newline - callers place this in a numbered list) and capped in length so
+// one bloated page can't blow up the token cost of a whole crawl.
+export function buildClusteringText(signal: PageSignal): string {
+  const parts = [signal.title, signal.metaDescription, ...signal.headings]
+    .map((p) => p.trim())
+    .filter(Boolean);
+
+  const deduped = Array.from(new Set(parts));
+  const joined = deduped.join(" · ");
+  return joined.length > MAX_SIGNAL_CHARS ? `${joined.slice(0, MAX_SIGNAL_CHARS)}…` : joined;
 }
 
 // Humanizes the last path segment of a URL into a readable label, used only
