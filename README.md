@@ -3,6 +3,17 @@
 Narzędzie do grupowania fraz kluczowych w klastry (silosy) tematyczne dla danej strony -
 przydatne przy planowaniu treści i architektury informacji serwisu.
 
+Dwa źródła danych wejściowych:
+
+- **Wklej frazy** - ręcznie wklejona lista fraz (np. z keyword researchu).
+- **Podaj URL strony** - podajesz tylko URL strony głównej, a narzędzie samo wykrywa
+  istniejące podstrony (przez `sitemap.xml`, a jeśli go brak - przez linki ze strony
+  głównej, z poszanowaniem `robots.txt`) i grupuje je wg tytułów. Przydatne, gdy chcesz
+  poukładać w silosy treść, która już istnieje na stronie. Bez zewnętrznego API - strona
+  jest pobierana bezpośrednio z serwera aplikacji (z zabezpieczeniem przed SSRF: blokadą
+  adresów prywatnych/loopback/link-local, ręczną walidacją przekierowań i limitem rozmiaru
+  odpowiedzi - zobacz `src/lib/urlSafety.ts`).
+
 Dostępne są dwie metody grupowania:
 
 - **Leksykalna** - działa w pełni offline, bez klucza API. Grupuje frazy na podstawie
@@ -42,8 +53,12 @@ Bez klucza aplikacja nadal działa - dostępna jest wtedy tylko metoda leksykaln
 
 ## Struktura
 
-- `src/app/page.tsx` - interfejs narzędzia (formularz + wyniki grupowania)
+- `src/app/page.tsx` - interfejs narzędzia (przełącznik trybu, formularz, wyniki grupowania)
 - `src/app/api/cluster/route.ts` - endpoint API (`GET` sprawdza dostępność metody
-  semantycznej, `POST` wykonuje grupowanie)
+  semantycznej, `POST` wykonuje grupowanie dla trybu `phrases` lub `crawl`)
 - `src/lib/lexicalClustering.ts` - grupowanie leksykalne (offline)
 - `src/lib/semanticClustering.ts` - grupowanie semantyczne przez OpenRouter
+- `src/lib/siteCrawler.ts` - wykrywanie podstron danej witryny (sitemap.xml / linki,
+  z poszanowaniem robots.txt)
+- `src/lib/htmlParsing.ts` - czyste funkcje parsujące HTML/XML/robots.txt (bez sieci)
+- `src/lib/urlSafety.ts` - walidacja URL i bezpieczny fetch (ochrona przed SSRF)
