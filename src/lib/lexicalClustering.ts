@@ -50,6 +50,13 @@ function overlapCoefficient(a: Set<string>, b: Set<string>): number {
 // significant words.
 const SIMILARITY_THRESHOLD = 0.24;
 
+// Reusable outside clustering itself (e.g. flagging near-duplicate page
+// content) - same tokenization and metric choice as clusterLexically().
+export function textSimilarity(a: string, b: string, options: { longDocuments?: boolean } = {}): number {
+  const similarity = options.longDocuments ? overlapCoefficient : jaccard;
+  return similarity(new Set(tokenize(a)), new Set(tokenize(b)));
+}
+
 interface ClusterNode {
   members: number[];
 }

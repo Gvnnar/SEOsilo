@@ -26,6 +26,23 @@ Dostępne są dwie metody grupowania:
   znaczeniu i intencji wyszukiwania, nie tylko wspólnych słowach. Wymaga klucza
   `OPENROUTER_API_KEY`.
 
+W trybie „Podaj URL strony" narzędzie dodatkowo:
+
+- **sugeruje linkowanie wewnętrzne** - dla każdego klastra z więcej niż jedną podstroną,
+  wg standardowego wzorca silosu: strona główna klastra (fraza główna) linkuje do każdej
+  pozostałej podstrony, a każda z nich linkuje z powrotem, z podpowiedzianym tekstem
+  anchora (etykieta strony docelowej). Eksport osobnym przyciskiem „Kopiuj sugestie
+  linkowania".
+- **ostrzega przed kanibalizacją treści** - flaguje pary podstron o bardzo podobnym
+  sygnale treści (≥70% wspólnego słownictwa) jako potencjalny duplikat/konkurencję o te
+  same zapytania, niezależnie od tego, do jakich klastrów trafiły.
+
+Endpoint API ma limity zapytań (rate limiting) na adres IP - ogólny limit dla wszystkich
+żądań oraz dodatkowy, ostrzejszy limit dla trybu `crawl` i metody semantycznej (obie
+generują realny koszt: żądania sieciowe do cudzej strony albo płatne wywołanie modelu).
+Limiter działa w pamięci procesu - wystarczający dla wdrożenia na jednej instancji; przy
+wielu instancjach każda liczy osobno (`src/lib/rateLimit.ts`).
+
 ## Uruchomienie
 
 ```bash
@@ -63,6 +80,9 @@ Bez klucza aplikacja nadal działa - dostępna jest wtedy tylko metoda leksykaln
 - `src/lib/lexicalClustering.ts` - grupowanie leksykalne (offline)
 - `src/lib/semanticClustering.ts` - grupowanie semantyczne przez OpenRouter
 - `src/lib/siteCrawler.ts` - wykrywanie podstron danej witryny (sitemap.xml / linki,
-  z poszanowaniem robots.txt)
+  z poszanowaniem robots.txt; dla ubogiej nawigacji - jeden dodatkowy poziom linków)
+- `src/lib/siloPlanning.ts` - sugestie linkowania wewnętrznego (pillar/spoke) i wykrywanie
+  potencjalnej kanibalizacji treści
 - `src/lib/htmlParsing.ts` - czyste funkcje parsujące HTML/XML/robots.txt (bez sieci)
 - `src/lib/urlSafety.ts` - walidacja URL i bezpieczny fetch (ochrona przed SSRF)
+- `src/lib/rateLimit.ts` - limity zapytań na IP (in-memory, per proces)

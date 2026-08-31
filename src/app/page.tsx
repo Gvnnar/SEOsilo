@@ -36,6 +36,7 @@ export default function Home() {
   const [clusters, setClusters] = useState<PhraseCluster[] | null>(null);
   const [crawlInfo, setCrawlInfo] = useState<ClusterResponse["crawl"] | null>(null);
   const [copied, setCopied] = useState(false);
+  const [linksCopied, setLinksCopied] = useState(false);
 
   useEffect(() => {
     fetch("/api/cluster")
@@ -107,6 +108,19 @@ export default function Home() {
     await navigator.clipboard.writeText(rows.join("\n"));
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  }
+
+  async function handleCopyLinkSuggestions() {
+    if (!clusters) return;
+    const rows = ["Klaster\tOd\tDo\tSugerowany anchor"];
+    for (const cluster of clusters) {
+      for (const link of cluster.linkSuggestions ?? []) {
+        rows.push(`${cluster.name}\t${link.fromUrl}\t${link.toUrl}\t${link.anchor}`);
+      }
+    }
+    await navigator.clipboard.writeText(rows.join("\n"));
+    setLinksCopied(true);
+    setTimeout(() => setLinksCopied(false), 2000);
   }
 
   return (
@@ -280,13 +294,46 @@ export default function Home() {
                 </p>
               )}
             </div>
-            <button
-              onClick={handleCopyCsv}
-              className="rounded-md border border-black/10 px-3 py-1.5 text-xs font-medium dark:border-white/15"
-            >
-              {copied ? "Skopiowano!" : "Kopiuj jako CSV"}
-            </button>
+            <div className="flex gap-2">
+              {clusters.some((c) => c.linkSuggestions && c.linkSuggestions.length > 0) && (
+                <button
+                  onClick={handleCopyLinkSuggestions}
+                  className="rounded-md border border-black/10 px-3 py-1.5 text-xs font-medium dark:border-white/15"
+                >
+                  {linksCopied ? "Skopiowano!" : "Kopiuj sugestie linkowania"}
+                </button>
+              )}
+              <button
+                onClick={handleCopyCsv}
+                className="rounded-md border border-black/10 px-3 py-1.5 text-xs font-medium dark:border-white/15"
+              >
+                {copied ? "Skopiowano!" : "Kopiuj jako CSV"}
+              </button>
+            </div>
           </div>
+
+          {crawlInfo && crawlInfo.duplicateWarnings.length > 0 && (
+            <details className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-amber-700 dark:text-amber-400">
+              <summary className="cursor-pointer text-sm font-medium">
+                ⚠️ Możliwa kanibalizacja treści: {crawlInfo.duplicateWarnings.length}{" "}
+                {plPlural(crawlInfo.duplicateWarnings.length, "para bardzo podobnych stron", "pary bardzo podobnych stron", "par bardzo podobnych stron")}
+              </summary>
+              <ul className="mt-2 flex flex-col gap-1.5 text-xs">
+                {crawlInfo.duplicateWarnings.map((w, i) => (
+                  <li key={i}>
+                    <a href={w.urlA} target="_blank" rel="noreferrer noopener" className="underline">
+                      {w.labelA}
+                    </a>{" "}
+                    ↔{" "}
+                    <a href={w.urlB} target="_blank" rel="noreferrer noopener" className="underline">
+                      {w.labelB}
+                    </a>{" "}
+                    <span className="opacity-70">({Math.round(w.similarity * 100)}% podobieństwa treści)</span>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
 
           <ul className="flex flex-col gap-3">
             {clusters.map((cluster, i) => (
@@ -323,6 +370,24 @@ export default function Home() {
                         </span>
                       ))}
                 </div>
+
+                {cluster.linkSuggestions && cluster.linkSuggestions.length > 0 && (
+                  <details className="mt-3 border-t border-black/10 pt-3 dark:border-white/15">
+                    <summary className="cursor-pointer text-xs font-medium text-black/60 dark:text-white/60">
+                      🔗 Sugerowane linki wewnętrzne ({cluster.linkSuggestions.length})
+                    </summary>
+                    <ul className="mt-2 flex flex-col gap-1 text-xs text-black/60 dark:text-white/60">
+                      {cluster.linkSuggestions.map((link, j) => (
+                        <li key={j}>
+                          <span className="font-medium text-black/80 dark:text-white/80">{link.fromLabel}</span>
+                          {" → "}
+                          <span className="font-medium text-black/80 dark:text-white/80">{link.toLabel}</span>
+                          <span className="opacity-70"> (anchor: „{link.anchor}”)</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
               </li>
             ))}
           </ul>

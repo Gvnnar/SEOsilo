@@ -6,17 +6,21 @@ import {
   SemanticClusteringUnavailableError,
 } from "@/lib/semanticClustering";
 import { discoverPages } from "@/lib/siteCrawler";
+import { buildLinkSuggestions, findDuplicateWarnings } from "@/lib/siloPlanning";
 import { SsrfBlockedError } from "@/lib/urlSafety";
-import {
-  MAX_PHRASES,
-  type ClusterRequestBody,
-  type ClusterResponse,
-  type PhraseCluster,
-} from "@/lib/types";
+import { checkRateLimit, clientKeyFromRequest } from "@/lib/rateLimit";
+import { MAX_PHRASES, type ClusterRequestBody, type ClusterResponse, type PhraseCluster } from "@/lib/types";
 
 // Crawling a site (fetching robots.txt, a sitemap, and a batch of pages) can
 // comfortably exceed the default serverless timeout on some hosts.
 export const maxDuration = 60;
+
+// Generous limit for normal interactive use of either mode.
+const GENERAL_LIMIT = { max: 30, windowMs: 5 * 60_000 };
+// Crawl mode fetches many external pages per call, and the semantic method
+// calls a paid LLM - both cost real money/bandwidth, so they share a
+// stricter budget on top of the general one.
+const EXPENSIVE_LIMIT = { max: 8, windowMs: 10 * 60_000 };
 
 export async function GET() {
   return NextResponse.json({ semanticAvailable: isSemanticClusteringAvailable() });
@@ -43,6 +47,21 @@ export async function POST(request: Request) {
 
   const method = body.method === "semantic" ? "semantic" : "lexical";
   const pageContext = typeof body.pageContext === "string" ? body.pageContext : undefined;
+  const isExpensive = body.mode === "crawl" || method === "semantic";
+
+  const clientKey = clientKeyFromRequest(request);
+  const general = checkRateLimit(`general:${clientKey}`, GENERAL_LIMIT.max, GENERAL_LIMIT.windowMs);
+  const expensive = isExpensive
+    ? checkRateLimit(`expensive:${clientKey}`, EXPENSIVE_LIMIT.max, EXPENSIVE_LIMIT.windowMs)
+    : { allowed: true, retryAfterSeconds: 0 };
+
+  if (!general.allowed || !expensive.allowed) {
+    const retryAfterSeconds = Math.max(general.retryAfterSeconds, expensive.retryAfterSeconds);
+    return NextResponse.json(
+      { error: `Zbyt wiele żądań. Spróbuj ponownie za ${retryAfterSeconds}s.` },
+      { status: 429, headers: { "Retry-After": String(retryAfterSeconds) } },
+    );
+  }
 
   try {
     if (body.mode === "crawl") {
@@ -128,13 +147,24 @@ async function handleCrawlMode(
     const displayPhrases = Array.from(new Set(pages.map((p) => p.phrase)));
     const mainPhrase = pagesBySignal.get(cluster.mainPhrase)?.[0]?.label ?? displayPhrases[0] ?? cluster.mainPhrase;
 
-    return { name: cluster.name, mainPhrase, phrases: displayPhrases, pages };
+    return {
+      name: cluster.name,
+      mainPhrase,
+      phrases: displayPhrases,
+      pages,
+      linkSuggestions: buildLinkSuggestions(mainPhrase, pages),
+    };
   });
 
   const responseBody: ClusterResponse = {
     method,
     clusters,
-    crawl: { discovered: crawl.discovered, skipped: crawl.skipped, source: crawl.source },
+    crawl: {
+      discovered: crawl.discovered,
+      skipped: crawl.skipped,
+      source: crawl.source,
+      duplicateWarnings: findDuplicateWarnings(crawl.pages),
+    },
   };
   return NextResponse.json(responseBody);
 }

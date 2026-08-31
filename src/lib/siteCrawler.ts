@@ -33,6 +33,11 @@ const MAX_PAGES_FROM_LINKS = 60;
 const MAX_SUB_SITEMAPS = 3;
 const PAGE_FETCH_CONCURRENCY = 6;
 const PAGE_FETCH_TIMEOUT_MS = 6000;
+// Below this many same-origin links on the homepage, its nav is probably
+// too sparse to represent the whole site (e.g. a "Blog" link but no
+// individual post links) - worth one bounded extra hop.
+const SPARSE_LINKS_THRESHOLD = 20;
+const SECOND_LEVEL_PAGE_LIMIT = 10;
 
 async function mapWithConcurrency<T, R>(
   items: T[],
@@ -94,10 +99,31 @@ async function collectSitemapUrls(origin: string): Promise<string[]> {
   return childUrlLists.flat();
 }
 
-async function collectLinksFromHomepage(origin: string, homepageHtml: string): Promise<string[]> {
-  const links = extractLinks(homepageHtml, origin);
-  const sameOrigin = links.filter((link) => new URL(link).origin === origin);
-  return Array.from(new Set(sameOrigin));
+function sameOriginLinks(html: string, baseUrl: string, origin: string): string[] {
+  return extractLinks(html, baseUrl).filter((link) => new URL(link).origin === origin);
+}
+
+// No sitemap - fall back to whatever the homepage links to, and if that nav
+// looks sparse, one bounded extra hop through those pages to surface links
+// the homepage itself doesn't carry (e.g. individual posts linked only from
+// a "Blog" index page, not from the homepage nav).
+async function collectLinksFromSite(origin: string, homepageHtml: string): Promise<string[]> {
+  const levelOne = new Set(sameOriginLinks(homepageHtml, origin, origin));
+
+  if (levelOne.size < SPARSE_LINKS_THRESHOLD) {
+    const toExpand = Array.from(levelOne).slice(0, SECOND_LEVEL_PAGE_LIMIT);
+    const levelTwoLists = await mapWithConcurrency(toExpand, PAGE_FETCH_CONCURRENCY, async (pageUrl) => {
+      try {
+        const res = await safeFetch(pageUrl, { timeoutMs: PAGE_FETCH_TIMEOUT_MS });
+        return res.ok ? sameOriginLinks(res.text, pageUrl, origin) : [];
+      } catch {
+        return [];
+      }
+    });
+    for (const list of levelTwoLists) for (const link of list) levelOne.add(link);
+  }
+
+  return Array.from(levelOne);
 }
 
 export async function discoverPages(siteUrlInput: string): Promise<CrawlResult> {
@@ -115,7 +141,7 @@ export async function discoverPages(siteUrlInput: string): Promise<CrawlResult> 
   let source: CrawlResult["source"] = "sitemap";
 
   if (candidateUrls.length === 0) {
-    candidateUrls = await collectLinksFromHomepage(origin, homepage.text);
+    candidateUrls = await collectLinksFromSite(origin, homepage.text);
     source = "links";
   }
 
