@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
 import { clusterLexically } from "@/lib/lexicalClustering";
 import {
+  clusterByEmbeddings,
+  isEmbeddingClusteringAvailable,
+  EmbeddingClusteringUnavailableError,
+} from "@/lib/embeddingClustering";
+import {
   clusterSemantically,
   isSemanticClusteringAvailable,
   SemanticClusteringUnavailableError,
@@ -9,7 +14,13 @@ import { discoverPages } from "@/lib/siteCrawler";
 import { buildLinkSuggestions, findDuplicateWarnings } from "@/lib/siloPlanning";
 import { SsrfBlockedError } from "@/lib/urlSafety";
 import { checkRateLimit, clientKeyFromRequest } from "@/lib/rateLimit";
-import { MAX_PHRASES, type ClusterRequestBody, type ClusterResponse, type PhraseCluster } from "@/lib/types";
+import {
+  MAX_PHRASES,
+  type ClusterRequestBody,
+  type ClusterResponse,
+  type ClusteringMethod,
+  type PhraseCluster,
+} from "@/lib/types";
 
 // Crawling a site (fetching robots.txt, a sitemap, and a batch of pages) can
 // comfortably exceed the default serverless timeout on some hosts.
@@ -17,24 +28,26 @@ export const maxDuration = 60;
 
 // Generous limit for normal interactive use of either mode.
 const GENERAL_LIMIT = { max: 30, windowMs: 5 * 60_000 };
-// Crawl mode fetches many external pages per call, and the semantic method
-// calls a paid LLM - both cost real money/bandwidth, so they share a
-// stricter budget on top of the general one.
+// Crawl mode fetches many external pages per call, and the embeddings/
+// semantic methods call a paid API - all cost real money/bandwidth, so they
+// share a stricter budget on top of the general one.
 const EXPENSIVE_LIMIT = { max: 8, windowMs: 10 * 60_000 };
 
 export async function GET() {
-  return NextResponse.json({ semanticAvailable: isSemanticClusteringAvailable() });
+  // Embeddings and the semantic method are gated on the same credential
+  // (OPENROUTER_API_KEY) - one flag covers both.
+  return NextResponse.json({ aiAvailable: isSemanticClusteringAvailable() || isEmbeddingClusteringAvailable() });
 }
 
 async function runClustering(
-  method: "lexical" | "semantic",
+  method: ClusteringMethod,
   phrases: string[],
   pageContext: string | undefined,
   contentKind: "phrases" | "pages",
 ) {
-  return method === "semantic"
-    ? clusterSemantically(phrases, pageContext, contentKind)
-    : clusterLexically(phrases, { longDocuments: contentKind === "pages" });
+  if (method === "semantic") return clusterSemantically(phrases, pageContext, contentKind);
+  if (method === "embeddings") return clusterByEmbeddings(phrases);
+  return clusterLexically(phrases, { longDocuments: contentKind === "pages" });
 }
 
 export async function POST(request: Request) {
@@ -45,9 +58,10 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Nieprawidłowy JSON w treści żądania." }, { status: 400 });
   }
 
-  const method = body.method === "semantic" ? "semantic" : "lexical";
+  const method: ClusteringMethod =
+    body.method === "semantic" || body.method === "embeddings" ? body.method : "lexical";
   const pageContext = typeof body.pageContext === "string" ? body.pageContext : undefined;
-  const isExpensive = body.mode === "crawl" || method === "semantic";
+  const isExpensive = body.mode === "crawl" || method === "semantic" || method === "embeddings";
 
   const clientKey = clientKeyFromRequest(request);
   const general = checkRateLimit(`general:${clientKey}`, GENERAL_LIMIT.max, GENERAL_LIMIT.windowMs);
@@ -69,7 +83,11 @@ export async function POST(request: Request) {
     }
     return await handlePhrasesMode(body.phrases, method, pageContext);
   } catch (error) {
-    if (error instanceof SemanticClusteringUnavailableError || error instanceof SsrfBlockedError) {
+    if (
+      error instanceof SemanticClusteringUnavailableError ||
+      error instanceof EmbeddingClusteringUnavailableError ||
+      error instanceof SsrfBlockedError
+    ) {
       return NextResponse.json({ error: error.message }, { status: 400 });
     }
     console.error("Cluster generation failed:", error);
@@ -82,7 +100,7 @@ export async function POST(request: Request) {
 
 async function handlePhrasesMode(
   rawPhrases: unknown,
-  method: "lexical" | "semantic",
+  method: ClusteringMethod,
   pageContext: string | undefined,
 ) {
   const phrases = Array.from(
@@ -110,7 +128,7 @@ async function handlePhrasesMode(
 
 async function handleCrawlMode(
   siteUrl: unknown,
-  method: "lexical" | "semantic",
+  method: ClusteringMethod,
   pageContext: string | undefined,
 ) {
   if (typeof siteUrl !== "string" || !siteUrl.trim()) {

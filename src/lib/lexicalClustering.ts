@@ -1,3 +1,4 @@
+import { agglomerativeCluster } from "./agglomerativeCluster";
 import type { PhraseCluster } from "./types";
 
 // Polish (plus a handful of common English) function words - excluded so
@@ -11,7 +12,7 @@ const STOPWORDS = new Set([
   "of", "for", "on", "and", "or",
 ]);
 
-function tokenize(phrase: string): string[] {
+export function tokenize(phrase: string): string[] {
   return phrase
     .toLowerCase()
     .normalize("NFKC")
@@ -57,93 +58,23 @@ export function textSimilarity(a: string, b: string, options: { longDocuments?: 
   return similarity(new Set(tokenize(a)), new Set(tokenize(b)));
 }
 
-interface ClusterNode {
-  members: number[];
-}
-
-// Average-link (UPGMA) agglomerative clustering: repeatedly merges the two
-// clusters with the highest *average* pairwise similarity, stopping once no
-// pair clears the threshold. Single-link (union-find over any-pair-matches)
-// chains unrelated phrases together transitively (A-B and B-C linked makes
-// A-C the same cluster even if unrelated); averaging over every member pair
-// avoids that chaining effect.
 export function clusterLexically(
   phrases: string[],
   options: { longDocuments?: boolean } = {},
 ): PhraseCluster[] {
   const similarity = options.longDocuments ? overlapCoefficient : jaccard;
-  const n = phrases.length;
   const tokenSets = phrases.map((phrase) => new Set(tokenize(phrase)));
 
-  const active = new Map<number, ClusterNode>();
-  for (let i = 0; i < n; i++) active.set(i, { members: [i] });
+  const groups = agglomerativeCluster(
+    phrases.length,
+    (i, j) => similarity(tokenSets[i], tokenSets[j]),
+    SIMILARITY_THRESHOLD,
+  );
 
-  // sumSim[a][b] = sum of similarity(tokenSets[i], tokenSets[j]) over all
-  // original-phrase pairs (i, j) with i in cluster a, j in cluster b.
-  const sumSim = new Map<number, Map<number, number>>();
-  const setSim = (a: number, b: number, v: number) => {
-    if (!sumSim.has(a)) sumSim.set(a, new Map());
-    if (!sumSim.has(b)) sumSim.set(b, new Map());
-    sumSim.get(a)!.set(b, v);
-    sumSim.get(b)!.set(a, v);
-  };
-  const getSim = (a: number, b: number) => sumSim.get(a)?.get(b) ?? 0;
-
-  for (let i = 0; i < n; i++) {
-    for (let j = i + 1; j < n; j++) {
-      setSim(i, j, similarity(tokenSets[i], tokenSets[j]));
-    }
-  }
-
-  let nextId = n;
-  while (active.size > 1) {
-    const ids = Array.from(active.keys());
-    let bestA = -1;
-    let bestB = -1;
-    let bestAvg = -Infinity;
-
-    for (let x = 0; x < ids.length; x++) {
-      for (let y = x + 1; y < ids.length; y++) {
-        const a = ids[x];
-        const b = ids[y];
-        const sizeA = active.get(a)!.members.length;
-        const sizeB = active.get(b)!.members.length;
-        const avg = getSim(a, b) / (sizeA * sizeB);
-        if (avg > bestAvg) {
-          bestAvg = avg;
-          bestA = a;
-          bestB = b;
-        }
-      }
-    }
-
-    if (bestAvg < SIMILARITY_THRESHOLD) break;
-
-    const nodeA = active.get(bestA)!;
-    const nodeB = active.get(bestB)!;
-    const mergedId = nextId++;
-
-    for (const otherId of active.keys()) {
-      if (otherId === bestA || otherId === bestB) continue;
-      setSim(mergedId, otherId, getSim(bestA, otherId) + getSim(bestB, otherId));
-    }
-
-    sumSim.delete(bestA);
-    sumSim.delete(bestB);
-    for (const row of sumSim.values()) {
-      row.delete(bestA);
-      row.delete(bestB);
-    }
-
-    active.delete(bestA);
-    active.delete(bestB);
-    active.set(mergedId, { members: [...nodeA.members, ...nodeB.members] });
-  }
-
-  const clusters = Array.from(active.values()).map((node) =>
+  const clusters = groups.map((indices) =>
     buildCluster(
-      node.members.map((i) => phrases[i]),
-      node.members.map((i) => tokenSets[i]),
+      indices.map((i) => phrases[i]),
+      indices.map((i) => tokenSets[i]),
     ),
   );
 
@@ -151,7 +82,10 @@ export function clusterLexically(
   return clusters;
 }
 
-function buildCluster(phrases: string[], tokenSets: Set<string>[]): PhraseCluster {
+// Exported for reuse by other clustering strategies (e.g. embeddingClustering.ts)
+// that decide *grouping* by a different signal but still want this same
+// keyword-frequency naming/pillar-phrase heuristic for display.
+export function buildCluster(phrases: string[], tokenSets: Set<string>[]): PhraseCluster {
   const frequency = new Map<string, number>();
   for (const tokens of tokenSets) {
     for (const token of tokens) {

@@ -30,7 +30,7 @@ export default function Home() {
   const [pageContext, setPageContext] = useState("");
   const [siteUrl, setSiteUrl] = useState("");
   const [method, setMethod] = useState<ClusteringMethod>("lexical");
-  const [semanticAvailable, setSemanticAvailable] = useState<boolean | null>(null);
+  const [aiAvailable, setAiAvailable] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [clusters, setClusters] = useState<PhraseCluster[] | null>(null);
@@ -41,8 +41,14 @@ export default function Home() {
   useEffect(() => {
     fetch("/api/cluster")
       .then((res) => res.json())
-      .then((data) => setSemanticAvailable(Boolean(data.semanticAvailable)))
-      .catch(() => setSemanticAvailable(false));
+      .then((data) => {
+        const available = Boolean(data.aiAvailable);
+        setAiAvailable(available);
+        // Embeddings are the sweet spot (fast, cheap, understands synonyms) -
+        // a better default than lexical once it's actually usable.
+        if (available) setMethod("embeddings");
+      })
+      .catch(() => setAiAvailable(false));
   }, []);
 
   const phraseCount = parsePhrases(phrasesText).length;
@@ -236,23 +242,45 @@ export default function Home() {
             </label>
             <label
               className={`flex items-start gap-2 rounded-md border border-black/10 p-3 text-sm dark:border-white/15 ${
-                semanticAvailable ? "cursor-pointer" : "cursor-not-allowed opacity-50"
+                aiAvailable ? "cursor-pointer" : "cursor-not-allowed opacity-50"
+              }`}
+            >
+              <input
+                type="radio"
+                name="method"
+                checked={method === "embeddings"}
+                disabled={!aiAvailable}
+                onChange={() => setMethod("embeddings")}
+                className="mt-0.5"
+              />
+              <span>
+                <span className="block font-medium">Embeddingi (szybkie AI)</span>
+                <span className="block text-xs text-black/50 dark:text-white/50">
+                  {aiAvailable === false
+                    ? "Wymaga ustawienia OPENROUTER_API_KEY na serwerze."
+                    : "Rozumie synonimy i parafrazy, dużo taniej i szybciej niż pełny model czatu."}
+                </span>
+              </span>
+            </label>
+            <label
+              className={`flex items-start gap-2 rounded-md border border-black/10 p-3 text-sm dark:border-white/15 ${
+                aiAvailable ? "cursor-pointer" : "cursor-not-allowed opacity-50"
               }`}
             >
               <input
                 type="radio"
                 name="method"
                 checked={method === "semantic"}
-                disabled={!semanticAvailable}
+                disabled={!aiAvailable}
                 onChange={() => setMethod("semantic")}
                 className="mt-0.5"
               />
               <span>
                 <span className="block font-medium">Semantyczne (AI)</span>
                 <span className="block text-xs text-black/50 dark:text-white/50">
-                  {semanticAvailable === false
+                  {aiAvailable === false
                     ? "Wymaga ustawienia OPENROUTER_API_KEY na serwerze."
-                    : "Grupuje po znaczeniu i intencji wyszukiwania, nie tylko słowach."}
+                    : "Najdokładniejsze rozumienie intencji, ale wolniejsze i droższe przy dużych zbiorach."}
                 </span>
               </span>
             </label>

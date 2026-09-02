@@ -1,4 +1,4 @@
-export type ClusteringMethod = "lexical" | "semantic";
+export type ClusteringMethod = "lexical" | "embeddings" | "semantic";
 export type ClusterInputMode = "phrases" | "crawl";
 
 export interface ClusterPage {
