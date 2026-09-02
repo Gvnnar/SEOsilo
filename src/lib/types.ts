@@ -55,4 +55,12 @@ export type ClusterRequestBody = { method: ClusteringMethod; pageContext?: strin
   | { mode: "crawl"; siteUrl: string }
 );
 
+// Crawl mode streams these as newline-delimited JSON (one per line) instead
+// of a single response body, so the UI can show live progress through a
+// crawl that can take several seconds.
+export type CrawlStreamEvent =
+  | { type: "status"; message: string; fetched?: number; total?: number }
+  | { type: "done"; result: ClusterResponse }
+  | { type: "error"; message: string };
+
 export const MAX_PHRASES = 500;

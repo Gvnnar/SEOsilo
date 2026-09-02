@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { ClusterInputMode, ClusteringMethod, ClusterResponse, PhraseCluster } from "@/lib/types";
+import type { ClusterInputMode, ClusteringMethod, ClusterResponse, CrawlStreamEvent, PhraseCluster } from "@/lib/types";
 
 // Polish plural rule: 1 -> singular, 2-4 (but not 12-14) -> "few" form,
 // otherwise (0, 5+, 11-14, ...) -> genitive plural.
@@ -37,6 +37,9 @@ export default function Home() {
   const [crawlInfo, setCrawlInfo] = useState<ClusterResponse["crawl"] | null>(null);
   const [copied, setCopied] = useState(false);
   const [linksCopied, setLinksCopied] = useState(false);
+  const [crawlProgress, setCrawlProgress] = useState<{ message: string; fetched?: number; total?: number } | null>(
+    null,
+  );
 
   useEffect(() => {
     fetch("/api/cluster")
@@ -56,32 +59,37 @@ export default function Home() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
 
-    let requestBody: Record<string, unknown>;
-    if (inputMode === "crawl") {
-      if (!siteUrl.trim()) {
-        setError("Podaj URL strony głównej.");
-        return;
-      }
-      requestBody = { mode: "crawl", siteUrl: siteUrl.trim(), method };
-    } else {
-      const phrases = parsePhrases(phrasesText);
-      if (phrases.length === 0) {
-        setError("Wklej co najmniej jedną frazę.");
-        return;
-      }
-      requestBody = { mode: "phrases", phrases, pageContext, method };
-    }
-
     setLoading(true);
     setError(null);
     setClusters(null);
     setCrawlInfo(null);
+    setCrawlProgress(null);
 
+    if (inputMode === "crawl") {
+      if (!siteUrl.trim()) {
+        setError("Podaj URL strony głównej.");
+        setLoading(false);
+        return;
+      }
+      await submitCrawl(siteUrl.trim(), method);
+      return;
+    }
+
+    const phrases = parsePhrases(phrasesText);
+    if (phrases.length === 0) {
+      setError("Wklej co najmniej jedną frazę.");
+      setLoading(false);
+      return;
+    }
+    await submitPhrases(phrases, pageContext, method);
+  }
+
+  async function submitPhrases(phrases: string[], pageContext: string, method: ClusteringMethod) {
     try {
       const res = await fetch("/api/cluster", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(requestBody),
+        body: JSON.stringify({ mode: "phrases", phrases, pageContext, method }),
       });
       const data: ClusterResponse & { error?: string } = await res.json();
       if (!res.ok) {
@@ -93,6 +101,65 @@ export default function Home() {
       setError(err instanceof Error ? err.message : "Wystąpił nieznany błąd.");
     } finally {
       setLoading(false);
+    }
+  }
+
+  // Crawl mode streams newline-delimited JSON progress events instead of one
+  // opaque response, since discovering + fetching dozens of pages can take
+  // several seconds - reading response.body incrementally lets the UI show
+  // live progress instead of a blank wait.
+  async function submitCrawl(siteUrl: string, method: ClusteringMethod) {
+    try {
+      const res = await fetch("/api/cluster", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "crawl", siteUrl, method }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error ?? "Wystąpił nieznany błąd.");
+      }
+      if (!res.body) {
+        throw new Error("Serwer nie zwrócił odpowiedzi.");
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let sawDone = false;
+
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const event: CrawlStreamEvent = JSON.parse(line);
+          if (event.type === "status") {
+            setCrawlProgress({ message: event.message, fetched: event.fetched, total: event.total });
+          } else if (event.type === "done") {
+            sawDone = true;
+            setClusters(event.result.clusters);
+            setCrawlInfo(event.result.crawl ?? null);
+          } else if (event.type === "error") {
+            throw new Error(event.message);
+          }
+        }
+      }
+
+      if (!sawDone) {
+        throw new Error("Połączenie przerwane przed ukończeniem grupowania.");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Wystąpił nieznany błąd.");
+    } finally {
+      setLoading(false);
+      setCrawlProgress(null);
     }
   }
 
@@ -292,12 +359,22 @@ export default function Home() {
           disabled={loading}
           className="self-start rounded-md bg-foreground px-5 py-2.5 text-sm font-medium text-background transition-opacity disabled:opacity-50"
         >
-          {loading
-            ? inputMode === "crawl"
-              ? "Skanowanie strony i grupowanie..."
-              : "Grupowanie..."
-            : "Pogrupuj"}
+          {loading ? (inputMode === "crawl" ? "Skanowanie strony..." : "Grupowanie...") : "Pogrupuj"}
         </button>
+
+        {loading && inputMode === "crawl" && crawlProgress && (
+          <div className="flex flex-col gap-1.5">
+            <p className="text-xs text-black/60 dark:text-white/60">{crawlProgress.message}</p>
+            {crawlProgress.total ? (
+              <div className="h-1.5 w-full overflow-hidden rounded-full bg-black/10 dark:bg-white/10">
+                <div
+                  className="h-full rounded-full bg-foreground transition-all"
+                  style={{ width: `${Math.round(((crawlProgress.fetched ?? 0) / crawlProgress.total) * 100)}%` }}
+                />
+              </div>
+            ) : null}
+          </div>
+        )}
 
         {error && (
           <p className="rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-600 dark:text-red-400">

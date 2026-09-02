@@ -14,7 +14,9 @@ Dwa źródła danych wejściowych:
   poukładać w silosy treść, która już istnieje na stronie. Bez zewnętrznego API - strona
   jest pobierana bezpośrednio z serwera aplikacji (z zabezpieczeniem przed SSRF: blokadą
   adresów prywatnych/loopback/link-local, ręczną walidacją przekierowań i limitem rozmiaru
-  odpowiedzi - zobacz `src/lib/urlSafety.ts`).
+  odpowiedzi - zobacz `src/lib/urlSafety.ts`). Odpowiedź jest strumieniowana (newline-delimited
+  JSON) - interfejs pokazuje żywy postęp skanowania („Pobrano X/Y podstron") zamiast jednego
+  długiego oczekiwania.
 
 Dostępne są trzy metody grupowania:
 
@@ -100,3 +102,8 @@ Bez klucza aplikacja nadal działa - dostępna jest wtedy tylko metoda leksykaln
 - `src/lib/htmlParsing.ts` - czyste funkcje parsujące HTML/XML/robots.txt (bez sieci)
 - `src/lib/urlSafety.ts` - walidacja URL i bezpieczny fetch (ochrona przed SSRF)
 - `src/lib/rateLimit.ts` - limity zapytań na IP (in-memory, per proces)
+
+W trybie `crawl`, `POST /api/cluster` zwraca `Content-Type: application/x-ndjson` -
+kolejne linie to zdarzenia `{"type":"status",...}` (postęp), `{"type":"done","result":...}`
+(finalny `ClusterResponse`) lub `{"type":"error","message":...}`. Tryb `phrases` zwraca
+zwykły, pojedynczy `application/json` bez zmian.

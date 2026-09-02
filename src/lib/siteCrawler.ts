@@ -28,6 +28,15 @@ export interface CrawlResult {
   source: "sitemap" | "links";
 }
 
+export interface CrawlProgressEvent {
+  message: string;
+  // Present only once page fetching has started - lets the UI show a "X/N".
+  fetched?: number;
+  total?: number;
+}
+
+export type CrawlProgressCallback = (event: CrawlProgressEvent) => void;
+
 const MAX_PAGES_FROM_SITEMAP = 80;
 const MAX_PAGES_FROM_LINKS = 60;
 const MAX_SUB_SITEMAPS = 3;
@@ -126,10 +135,14 @@ async function collectLinksFromSite(origin: string, homepageHtml: string): Promi
   return Array.from(levelOne);
 }
 
-export async function discoverPages(siteUrlInput: string): Promise<CrawlResult> {
+export async function discoverPages(
+  siteUrlInput: string,
+  onProgress?: CrawlProgressCallback,
+): Promise<CrawlResult> {
   const validated = await assertPublicHttpUrl(siteUrlInput);
   const origin = validated.origin;
 
+  onProgress?.({ message: "Pobieram stronę główną..." });
   const homepage = await safeFetch(origin, { timeoutMs: 8000 });
   if (!homepage.ok) {
     throw new SsrfBlockedError(`Nie udało się pobrać strony głównej (status ${homepage.status}).`);
@@ -137,10 +150,12 @@ export async function discoverPages(siteUrlInput: string): Promise<CrawlResult> 
 
   const disallowRules = await fetchRobotsDisallowRules(origin);
 
+  onProgress?.({ message: "Sprawdzam sitemap.xml..." });
   let candidateUrls = await collectSitemapUrls(origin);
   let source: CrawlResult["source"] = "sitemap";
 
   if (candidateUrls.length === 0) {
+    onProgress?.({ message: "Brak sitemap.xml - szukam linków ze strony głównej..." });
     candidateUrls = await collectLinksFromSite(origin, homepage.text);
     source = "links";
   }
@@ -161,6 +176,8 @@ export async function discoverPages(siteUrlInput: string): Promise<CrawlResult> 
   const cap = source === "sitemap" ? MAX_PAGES_FROM_SITEMAP : MAX_PAGES_FROM_LINKS;
   const limited = candidateUrls.slice(0, cap);
 
+  onProgress?.({ message: `Pobieram ${limited.length} podstron...`, fetched: 0, total: limited.length });
+  let fetchedCount = 0;
   const fetched = await mapWithConcurrency(limited, PAGE_FETCH_CONCURRENCY, async (url) => {
     try {
       const res = await safeFetch(url, { timeoutMs: PAGE_FETCH_TIMEOUT_MS });
@@ -171,6 +188,13 @@ export async function discoverPages(siteUrlInput: string): Promise<CrawlResult> 
       return { url: res.finalUrl, label, signal } satisfies DiscoveredPage;
     } catch {
       return null;
+    } finally {
+      fetchedCount++;
+      onProgress?.({
+        message: `Pobrano ${fetchedCount}/${limited.length} podstron`,
+        fetched: fetchedCount,
+        total: limited.length,
+      });
     }
   });
 
