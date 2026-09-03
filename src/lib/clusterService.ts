@@ -1,9 +1,18 @@
 import { clusterLexically } from "./lexicalClustering";
 import { clusterByEmbeddings } from "./embeddingClustering";
 import { clusterSemantically } from "./semanticClustering";
+import { mergeContent, type MergeSource } from "./contentMerging";
 import { discoverPages, type CrawlProgressCallback } from "./siteCrawler";
 import { buildLinkSuggestions, findDuplicateWarnings } from "./siloPlanning";
-import { MAX_PHRASES, type ClusterResponse, type ClusteringMethod, type PhraseCluster } from "./types";
+import { extractFullPageContent, labelFromUrlSlug } from "./htmlParsing";
+import { safeFetch } from "./urlSafety";
+import {
+  MAX_PHRASES,
+  type ClusterResponse,
+  type ClusteringMethod,
+  type MergedContentResult,
+  type PhraseCluster,
+} from "./types";
 
 // Shared by the HTTP route (src/app/api/cluster/route.ts) and the MCP
 // server (src/mcp/server.ts) - both are thin wrappers around this: the
@@ -97,4 +106,41 @@ export async function clusterSite(
       duplicateWarnings: findDuplicateWarnings(crawl.pages),
     },
   };
+}
+
+const MIN_MERGE_SOURCES = 2;
+const MAX_MERGE_SOURCES = 6;
+
+// Fetches each given URL fresh (independent of any prior crawl) and rewrites
+// them into one consolidated piece - see src/lib/contentMerging.ts. Used by
+// the MCP server's merge_similar_content tool, typically fed with a pair of
+// URLs surfaced by clusterSite's crawl.duplicateWarnings.
+export async function mergeSimilarContent(
+  urls: string[],
+  pageContext: string | undefined,
+): Promise<MergedContentResult> {
+  const trimmedUrls = Array.from(new Set(urls.map((u) => u.trim()).filter(Boolean)));
+
+  if (trimmedUrls.length < MIN_MERGE_SOURCES) {
+    throw new InvalidClusterInputError("Podaj co najmniej dwa adresy URL do połączenia.");
+  }
+  if (trimmedUrls.length > MAX_MERGE_SOURCES) {
+    throw new InvalidClusterInputError(`Zbyt wiele adresów URL naraz (max ${MAX_MERGE_SOURCES}).`);
+  }
+
+  const sources: MergeSource[] = await Promise.all(
+    trimmedUrls.map(async (url) => {
+      const res = await safeFetch(url, { timeoutMs: 8000 });
+      if (!res.ok) {
+        throw new InvalidClusterInputError(`Nie udało się pobrać ${url} (status ${res.status}).`);
+      }
+      const { title, content } = extractFullPageContent(res.text);
+      if (!content) {
+        throw new InvalidClusterInputError(`Strona ${url} nie ma treści do scalenia.`);
+      }
+      return { url: res.finalUrl, label: title || labelFromUrlSlug(res.finalUrl), content };
+    }),
+  );
+
+  return mergeContent(sources, pageContext);
 }

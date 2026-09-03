@@ -36,6 +36,23 @@ export interface DuplicateWarning {
   similarity: number;
 }
 
+// Result of rewriting several near-duplicate pages into one consolidated
+// piece (src/lib/contentMerging.ts) - exposed through the MCP server only.
+export interface MergedContentResult {
+  // The source URL kept as canonical (heuristically: the one with the most
+  // existing content) - where the merged content should be published.
+  primaryUrl: string;
+  primaryLabel: string;
+  // The other source URLs, which should 301-redirect to primaryUrl once the
+  // merged content is published - standard content-consolidation practice.
+  redirectFromUrls: string[];
+  title: string;
+  metaDescription: string;
+  // Full merged article body, in Markdown.
+  content: string;
+  sources: { url: string; label: string }[];
+}
+
 export interface ClusterResponse {
   method: ClusteringMethod;
   clusters: PhraseCluster[];

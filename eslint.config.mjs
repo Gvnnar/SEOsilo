@@ -12,6 +12,9 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // MCP server build output (npm run build:mcp) - compiled CommonJS, not
+    // source to lint.
+    "dist/**",
   ]),
 ]);
 

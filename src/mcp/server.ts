@@ -7,7 +7,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { clusterPhrases, clusterSite, InvalidClusterInputError } from "../lib/clusterService";
+import { clusterPhrases, clusterSite, mergeSimilarContent, InvalidClusterInputError } from "../lib/clusterService";
 import { SsrfBlockedError } from "../lib/urlSafety";
 import type { ClusteringMethod } from "../lib/types";
 
@@ -83,6 +83,41 @@ server.registerTool(
   async ({ siteUrl, method }) => {
     try {
       const result = await clusterSite(siteUrl, method as ClusteringMethod, undefined);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    } catch (error) {
+      return toolError(error);
+    }
+  },
+);
+
+server.registerTool(
+  "merge_similar_content",
+  {
+    title: "Merge near-duplicate pages into one",
+    description:
+      "Fetches 2-6 URLs of existing pages that overlap in topic (e.g. flagged as near-duplicate by " +
+      "cluster_site's crawl.duplicateWarnings) and uses an LLM to rewrite them into a single, " +
+      "consolidated, non-repetitive page: a merged title, meta description and full article body " +
+      "(Markdown) preserving the unique value of every source. Also names which existing URL to " +
+      "keep as the canonical page (the one with the most existing content) and lists the other " +
+      "URLs that should 301-redirect to it - standard SEO content-consolidation practice for fixing " +
+      "keyword cannibalization / duplicate content. This is a generative rewriting task with no " +
+      "offline fallback, so it always requires OPENROUTER_API_KEY to be configured on the server.",
+    inputSchema: {
+      urls: z
+        .array(z.string())
+        .min(2)
+        .max(6)
+        .describe("2 to 6 URLs of near-duplicate/overlapping pages to merge into one."),
+      pageContext: z
+        .string()
+        .optional()
+        .describe("Optional topic or site context to bias the merged content toward."),
+    },
+  },
+  async ({ urls, pageContext }) => {
+    try {
+      const result = await mergeSimilarContent(urls, pageContext);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     } catch (error) {
       return toolError(error);

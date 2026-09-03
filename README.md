@@ -92,8 +92,19 @@ Bez klucza aplikacja nadal działa - dostępna jest wtedy tylko metoda leksykaln
 
 SEOsilo jest też dostępne jako serwer [MCP](https://modelcontextprotocol.io) - klient taki
 jak Claude Desktop czy Claude Code może wywoływać grupowanie bezpośrednio, bez przechodzenia
-przez przeglądarkę. Serwer eksponuje dwa narzędzia (`cluster_phrases`, `cluster_site`) oparte
-o dokładnie ten sam silnik grupujący co aplikacja webowa (`src/lib/clusterService.ts`).
+przez przeglądarkę. Serwer eksponuje trzy narzędzia oparte o dokładnie ten sam silnik co
+aplikacja webowa (`src/lib/clusterService.ts`):
+
+- `cluster_phrases` - grupuje frazy kluczowe w klastry tematyczne.
+- `cluster_site` - wykrywa i grupuje istniejące podstrony danej witryny.
+- `merge_similar_content` - bierze 2-6 adresów URL bliźniaczo podobnych podstron (np. tych
+  wskazanych przez `cluster_site` w `crawl.duplicateWarnings` jako potencjalna kanibalizacja)
+  i przez model AI (OpenRouter) przepisuje je w jedną, spójną i niepowielającą się treść -
+  scalony tytuł, meta description i pełny artykuł (Markdown), zachowujący unikalną wartość
+  każdego źródła. Wskazuje też, którego istniejącego adresu użyć jako docelowego (tego z
+  największą ilością treści) i które pozostałe adresy powinny na niego przekierować (301) -
+  standardowa praktyka SEO przy konsolidacji treści. To zadanie generatywne bez trybu offline,
+  więc zawsze wymaga `OPENROUTER_API_KEY` (`src/lib/contentMerging.ts`).
 
 ```bash
 npm run build:mcp
@@ -143,9 +154,12 @@ które nie ma zastosowania do procesu MCP uruchamianego lokalnie przez zaufanego
   ekstrakcja sygnału strony obejmuje tytuł, meta/OG, nagłówki i fragment treści głównej
 - `src/lib/urlSafety.ts` - walidacja URL i bezpieczny fetch (ochrona przed SSRF)
 - `src/lib/rateLimit.ts` - limity zapytań na IP (in-memory, per proces, tylko HTTP)
-- `src/lib/clusterService.ts` - wspólna logika grupowania współdzielona przez endpoint API
-  i serwer MCP (`clusterPhrases`, `clusterSite`)
-- `src/mcp/server.ts` - serwer MCP (stdio), narzędzia `cluster_phrases` i `cluster_site`
+- `src/lib/clusterService.ts` - wspólna logika grupowania i scalania treści współdzielona przez
+  endpoint API i serwer MCP (`clusterPhrases`, `clusterSite`, `mergeSimilarContent`)
+- `src/lib/contentMerging.ts` - scalanie kilku podobnych podstron w jedną przez OpenRouter
+  (dostępne tylko przez MCP, patrz sekcja „Serwer MCP")
+- `src/mcp/server.ts` - serwer MCP (stdio), narzędzia `cluster_phrases`, `cluster_site` i
+  `merge_similar_content`
 
 W trybie `crawl`, `POST /api/cluster` zwraca `Content-Type: application/x-ndjson` -
 kolejne linie to zdarzenia `{"type":"status",...}` (postęp), `{"type":"done","result":...}`

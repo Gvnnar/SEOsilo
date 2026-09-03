@@ -76,12 +76,41 @@ export function extractPageSignal(html: string): PageSignal {
   // Strip boilerplate that repeats on every page (nav, footer, forms, ...)
   // before pulling body text, or it would dominate the signal instead of
   // what this specific page is actually about.
-  $("nav, header, footer, script, style, noscript, svg, form, aside, iframe, template").remove();
-  const mainContainer = $("main, article").first();
-  const bodySource = mainContainer.length > 0 ? mainContainer : $("body");
-  const bodyExcerpt = normalizeText(bodySource.text()).slice(0, MAX_BODY_EXCERPT_CHARS);
+  stripBoilerplate($);
+  const bodyExcerpt = extractBodyText($, MAX_BODY_EXCERPT_CHARS);
 
   return { title, h1, metaDescription, headings, bodyExcerpt };
+}
+
+function stripBoilerplate($: ReturnType<typeof cheerio.load>): void {
+  $("nav, header, footer, script, style, noscript, svg, form, aside, iframe, template").remove();
+}
+
+function extractBodyText($: ReturnType<typeof cheerio.load>, maxChars: number): string {
+  const mainContainer = $("main, article").first();
+  const bodySource = mainContainer.length > 0 ? mainContainer : $("body");
+  return normalizeText(bodySource.text()).slice(0, maxChars);
+}
+
+export interface FullPageContent {
+  title: string;
+  content: string;
+}
+
+const MAX_MERGE_CONTENT_CHARS = 6000;
+
+// Richer extraction for merging near-duplicate pages into one: same
+// boilerplate-stripped body text as extractPageSignal, but with a much
+// higher cap - clustering only needs a short signal, while consolidating
+// several pages' content needs enough of each to preserve its unique value.
+export function extractFullPageContent(html: string): FullPageContent {
+  const $ = cheerio.load(html);
+  const title =
+    normalizeText($("title").first().text()) ||
+    normalizeText($('meta[property="og:title"]').first().attr("content") ?? "");
+  stripBoilerplate($);
+  const content = extractBodyText($, MAX_MERGE_CONTENT_CHARS);
+  return { title, content };
 }
 
 const MAX_SIGNAL_CHARS = 1200;
