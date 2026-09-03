@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "resolveJsonModule": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "declaration": false,
+    "noEmit": false
+  },
+  "include": ["src/mcp/**/*.ts", "src/lib/**/*.ts"],
+  "exclude": ["node_modules"]
+}

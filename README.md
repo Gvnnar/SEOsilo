@@ -9,8 +9,12 @@ Dwa źródła danych wejściowych:
 - **Podaj URL strony** - podajesz tylko URL strony głównej, a narzędzie samo wykrywa
   istniejące podstrony (przez `sitemap.xml`, a jeśli go brak - przez linki ze strony
   głównej, z poszanowaniem `robots.txt`). Każda podstrona jest analizowana osobno - do
-  grupowania trafia tytuł, meta description i nagłówki H1-H3, a nie sam tytuł - i dopiero
-  ten bogatszy sygnał treści decyduje o przydziale do klastra. Przydatne, gdy chcesz
+  grupowania trafia tytuł, meta description (z fallbackiem na Open Graph), nagłówki H1-H3
+  i fragment właściwej treści strony (bez nawigacji/stopki/formularzy), a nie sam tytuł -
+  dopiero ten bogaty sygnał decyduje o przydziale do klastra. Podstrony pobierane są
+  współbieżnie (domyślnie 8 naraz, konfigurowalne przez `CRAWL_CONCURRENCY`), a strona
+  główna, `robots.txt` i `sitemap.xml` sprawdzane są równolegle zamiast po kolei. Przydatne,
+  gdy chcesz
   poukładać w silosy treść, która już istnieje na stronie. Bez zewnętrznego API - strona
   jest pobierana bezpośrednio z serwera aplikacji (z zabezpieczeniem przed SSRF: blokadą
   adresów prywatnych/loopback/link-local, ręczną walidacją przekierowań i limitem rozmiaru
@@ -84,6 +88,41 @@ realnym ruchu - warto go dostroić po pierwszych uruchomieniach na prawdziwych d
 
 Bez klucza aplikacja nadal działa - dostępna jest wtedy tylko metoda leksykalna.
 
+## Serwer MCP
+
+SEOsilo jest też dostępne jako serwer [MCP](https://modelcontextprotocol.io) - klient taki
+jak Claude Desktop czy Claude Code może wywoływać grupowanie bezpośrednio, bez przechodzenia
+przez przeglądarkę. Serwer eksponuje dwa narzędzia (`cluster_phrases`, `cluster_site`) oparte
+o dokładnie ten sam silnik grupujący co aplikacja webowa (`src/lib/clusterService.ts`).
+
+```bash
+npm run build:mcp
+```
+
+Następnie w konfiguracji klienta MCP (np. `claude_desktop_config.json` albo
+`.mcp.json` w projekcie dla Claude Code):
+
+```json
+{
+  "mcpServers": {
+    "seosilo": {
+      "command": "node",
+      "args": ["/pełna/ścieżka/do/SEOsilo/dist/mcp/server.js"],
+      "env": {
+        "OPENROUTER_API_KEY": "sk-or-..."
+      }
+    }
+  }
+}
+```
+
+`env` jest opcjonalny - bez klucza dostępna jest tylko metoda `lexical` (tak jak w aplikacji
+webowej). Serwer komunikuje się przez stdio (standardowy transport dla lokalnych narzędzi MCP)
+i dzieli ten sam silnik co endpoint API - łącznie z ochroną SSRF, limitem liczby stron i
+cache'em embeddingów - to dosłownie ten sam kod, inny sposób wywołania. Nie ma natomiast
+limitów zapytań (rate limiting) - to zabezpieczenie HTTP-owe przed publicznym nadużyciem,
+które nie ma zastosowania do procesu MCP uruchamianego lokalnie przez zaufanego klienta.
+
 ## Struktura
 
 - `src/app/page.tsx` - interfejs narzędzia (przełącznik trybu, formularz, wyniki grupowania)
@@ -96,12 +135,17 @@ Bez klucza aplikacja nadal działa - dostępna jest wtedy tylko metoda leksykaln
   (OpenRouter), z cache'em wektorów per treść
 - `src/lib/semanticClustering.ts` - grupowanie semantyczne przez OpenRouter
 - `src/lib/siteCrawler.ts` - wykrywanie podstron danej witryny (sitemap.xml / linki,
-  z poszanowaniem robots.txt; dla ubogiej nawigacji - jeden dodatkowy poziom linków)
+  z poszanowaniem robots.txt; dla ubogiej nawigacji - jeden dodatkowy poziom linków;
+  strona główna/robots.txt/sitemap pobierane równolegle, strony współbieżnie)
 - `src/lib/siloPlanning.ts` - sugestie linkowania wewnętrznego (pillar/spoke) i wykrywanie
   potencjalnej kanibalizacji treści
-- `src/lib/htmlParsing.ts` - czyste funkcje parsujące HTML/XML/robots.txt (bez sieci)
+- `src/lib/htmlParsing.ts` - czyste funkcje parsujące HTML/XML/robots.txt (bez sieci);
+  ekstrakcja sygnału strony obejmuje tytuł, meta/OG, nagłówki i fragment treści głównej
 - `src/lib/urlSafety.ts` - walidacja URL i bezpieczny fetch (ochrona przed SSRF)
-- `src/lib/rateLimit.ts` - limity zapytań na IP (in-memory, per proces)
+- `src/lib/rateLimit.ts` - limity zapytań na IP (in-memory, per proces, tylko HTTP)
+- `src/lib/clusterService.ts` - wspólna logika grupowania współdzielona przez endpoint API
+  i serwer MCP (`clusterPhrases`, `clusterSite`)
+- `src/mcp/server.ts` - serwer MCP (stdio), narzędzia `cluster_phrases` i `cluster_site`
 
 W trybie `crawl`, `POST /api/cluster` zwraca `Content-Type: application/x-ndjson` -
 kolejne linie to zdarzenia `{"type":"status",...}` (postęp), `{"type":"done","result":...}`

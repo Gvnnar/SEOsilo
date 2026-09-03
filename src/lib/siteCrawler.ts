@@ -40,7 +40,20 @@ export type CrawlProgressCallback = (event: CrawlProgressEvent) => void;
 const MAX_PAGES_FROM_SITEMAP = 80;
 const MAX_PAGES_FROM_LINKS = 60;
 const MAX_SUB_SITEMAPS = 3;
-const PAGE_FETCH_CONCURRENCY = 6;
+// How many pages to fetch at once. Configurable (CRAWL_CONCURRENCY) since
+// the right value trades off crawl speed against politeness toward the
+// target site and the deployment's own outbound connection limits - capped
+// so a misconfigured env var can't turn this into a stress test.
+const DEFAULT_PAGE_FETCH_CONCURRENCY = 8;
+const MAX_PAGE_FETCH_CONCURRENCY = 16;
+function resolvePageFetchConcurrency(): number {
+  const fromEnv = Number(process.env.CRAWL_CONCURRENCY);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) {
+    return Math.min(Math.floor(fromEnv), MAX_PAGE_FETCH_CONCURRENCY);
+  }
+  return DEFAULT_PAGE_FETCH_CONCURRENCY;
+}
+const PAGE_FETCH_CONCURRENCY = resolvePageFetchConcurrency();
 const PAGE_FETCH_TIMEOUT_MS = 6000;
 // Below this many same-origin links on the homepage, its nav is probably
 // too sparse to represent the whole site (e.g. a "Blog" link but no
@@ -142,16 +155,21 @@ export async function discoverPages(
   const validated = await assertPublicHttpUrl(siteUrlInput);
   const origin = validated.origin;
 
-  onProgress?.({ message: "Pobieram stronę główną..." });
-  const homepage = await safeFetch(origin, { timeoutMs: 8000 });
+  // Homepage, robots.txt and sitemap.xml are three independent requests -
+  // none needs another's result - so fetch all three concurrently instead
+  // of paying for three sequential round trips before any page discovery
+  // can even start.
+  onProgress?.({ message: "Pobieram stronę główną i sprawdzam sitemap.xml..." });
+  const [homepage, disallowRules, sitemapUrls] = await Promise.all([
+    safeFetch(origin, { timeoutMs: 8000 }),
+    fetchRobotsDisallowRules(origin),
+    collectSitemapUrls(origin),
+  ]);
   if (!homepage.ok) {
     throw new SsrfBlockedError(`Nie udało się pobrać strony głównej (status ${homepage.status}).`);
   }
 
-  const disallowRules = await fetchRobotsDisallowRules(origin);
-
-  onProgress?.({ message: "Sprawdzam sitemap.xml..." });
-  let candidateUrls = await collectSitemapUrls(origin);
+  let candidateUrls = sitemapUrls;
   let source: CrawlResult["source"] = "sitemap";
 
   if (candidateUrls.length === 0) {

@@ -1,27 +1,10 @@
 import { NextResponse } from "next/server";
-import { clusterLexically } from "@/lib/lexicalClustering";
-import {
-  clusterByEmbeddings,
-  isEmbeddingClusteringAvailable,
-  EmbeddingClusteringUnavailableError,
-} from "@/lib/embeddingClustering";
-import {
-  clusterSemantically,
-  isSemanticClusteringAvailable,
-  SemanticClusteringUnavailableError,
-} from "@/lib/semanticClustering";
-import { discoverPages } from "@/lib/siteCrawler";
-import { buildLinkSuggestions, findDuplicateWarnings } from "@/lib/siloPlanning";
+import { isEmbeddingClusteringAvailable, EmbeddingClusteringUnavailableError } from "@/lib/embeddingClustering";
+import { isSemanticClusteringAvailable, SemanticClusteringUnavailableError } from "@/lib/semanticClustering";
+import { clusterPhrases, clusterSite, InvalidClusterInputError } from "@/lib/clusterService";
 import { SsrfBlockedError } from "@/lib/urlSafety";
 import { checkRateLimit, clientKeyFromRequest } from "@/lib/rateLimit";
-import {
-  MAX_PHRASES,
-  type ClusterRequestBody,
-  type ClusterResponse,
-  type ClusteringMethod,
-  type CrawlStreamEvent,
-  type PhraseCluster,
-} from "@/lib/types";
+import { type ClusterRequestBody, type ClusteringMethod, type CrawlStreamEvent } from "@/lib/types";
 
 // Crawling a site (fetching robots.txt, a sitemap, and a batch of pages) can
 // comfortably exceed the default serverless timeout on some hosts.
@@ -40,15 +23,13 @@ export async function GET() {
   return NextResponse.json({ aiAvailable: isSemanticClusteringAvailable() || isEmbeddingClusteringAvailable() });
 }
 
-async function runClustering(
-  method: ClusteringMethod,
-  phrases: string[],
-  pageContext: string | undefined,
-  contentKind: "phrases" | "pages",
-) {
-  if (method === "semantic") return clusterSemantically(phrases, pageContext, contentKind);
-  if (method === "embeddings") return clusterByEmbeddings(phrases);
-  return clusterLexically(phrases, { longDocuments: contentKind === "pages" });
+function isKnownClusterError(error: unknown): error is Error {
+  return (
+    error instanceof SemanticClusteringUnavailableError ||
+    error instanceof EmbeddingClusteringUnavailableError ||
+    error instanceof SsrfBlockedError ||
+    error instanceof InvalidClusterInputError
+  );
 }
 
 export async function POST(request: Request) {
@@ -83,13 +64,11 @@ export async function POST(request: Request) {
   }
 
   try {
-    return await handlePhrasesMode(body.phrases, method, pageContext);
+    const phrases = Array.isArray(body.phrases) ? body.phrases.filter((p): p is string => typeof p === "string") : [];
+    const result = await clusterPhrases(phrases, method, pageContext);
+    return NextResponse.json(result);
   } catch (error) {
-    if (
-      error instanceof SemanticClusteringUnavailableError ||
-      error instanceof EmbeddingClusteringUnavailableError ||
-      error instanceof SsrfBlockedError
-    ) {
+    if (isKnownClusterError(error)) {
       return NextResponse.json({ error: error.message }, { status: 400 });
     }
     console.error("Cluster generation failed:", error);
@@ -98,34 +77,6 @@ export async function POST(request: Request) {
       { status: 500 },
     );
   }
-}
-
-async function handlePhrasesMode(
-  rawPhrases: unknown,
-  method: ClusteringMethod,
-  pageContext: string | undefined,
-) {
-  const phrases = Array.from(
-    new Set(
-      (Array.isArray(rawPhrases) ? rawPhrases : [])
-        .map((p) => (typeof p === "string" ? p.trim() : ""))
-        .filter(Boolean),
-    ),
-  );
-
-  if (phrases.length === 0) {
-    return NextResponse.json({ error: "Podaj co najmniej jedną frazę." }, { status: 400 });
-  }
-  if (phrases.length > MAX_PHRASES) {
-    return NextResponse.json(
-      { error: `Zbyt wiele fraz (max ${MAX_PHRASES}). Podano: ${phrases.length}.` },
-      { status: 400 },
-    );
-  }
-
-  const clusters = await runClustering(method, phrases, pageContext, "phrases");
-  const responseBody: ClusterResponse = { method, clusters };
-  return NextResponse.json(responseBody);
 }
 
 // Crawl mode can take several seconds (robots.txt + sitemap/link discovery +
@@ -138,10 +89,9 @@ function handleCrawlMode(
   method: ClusteringMethod,
   pageContext: string | undefined,
 ): Response {
-  if (typeof siteUrl !== "string" || !siteUrl.trim()) {
+  if (typeof siteUrl !== "string") {
     return NextResponse.json({ error: "Podaj URL strony głównej." }, { status: 400 });
   }
-  const trimmedSiteUrl = siteUrl.trim();
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
@@ -151,66 +101,12 @@ function handleCrawlMode(
       };
 
       try {
-        const crawl = await discoverPages(trimmedSiteUrl, (progress) => {
+        const result = await clusterSite(siteUrl, method, pageContext, (progress) => {
           send({ type: "status", message: progress.message, fetched: progress.fetched, total: progress.total });
         });
-
-        if (crawl.pages.length === 0) {
-          send({ type: "error", message: "Nie udało się znaleźć żadnych podstron pod tym adresem." });
-          return;
-        }
-
-        send({ type: "status", message: "Grupowanie..." });
-
-        // Clustering reasons over each page's content signal (title + meta
-        // description + headings), not its bare title - but the UI and CSV
-        // export still show the short label. Multiple pages can end up with
-        // an identical signal (rare, e.g. near-duplicate content), so keep
-        // the full list per signal rather than assuming a 1:1 mapping.
-        const pagesBySignal = new Map<string, { label: string; url: string }[]>();
-        for (const page of crawl.pages) {
-          const entries = pagesBySignal.get(page.signal) ?? [];
-          entries.push({ label: page.label, url: page.url });
-          pagesBySignal.set(page.signal, entries);
-        }
-
-        const signals = Array.from(pagesBySignal.keys());
-        const rawClusters = await runClustering(method, signals, pageContext || trimmedSiteUrl, "pages");
-
-        const clusters: PhraseCluster[] = rawClusters.map((cluster) => {
-          const pages = cluster.phrases.flatMap((signal) =>
-            (pagesBySignal.get(signal) ?? []).map((entry) => ({ phrase: entry.label, url: entry.url })),
-          );
-          const displayPhrases = Array.from(new Set(pages.map((p) => p.phrase)));
-          const mainPhrase =
-            pagesBySignal.get(cluster.mainPhrase)?.[0]?.label ?? displayPhrases[0] ?? cluster.mainPhrase;
-
-          return {
-            name: cluster.name,
-            mainPhrase,
-            phrases: displayPhrases,
-            pages,
-            linkSuggestions: buildLinkSuggestions(mainPhrase, pages),
-          };
-        });
-
-        const result: ClusterResponse = {
-          method,
-          clusters,
-          crawl: {
-            discovered: crawl.discovered,
-            skipped: crawl.skipped,
-            source: crawl.source,
-            duplicateWarnings: findDuplicateWarnings(crawl.pages),
-          },
-        };
         send({ type: "done", result });
       } catch (error) {
-        if (
-          error instanceof SemanticClusteringUnavailableError ||
-          error instanceof EmbeddingClusteringUnavailableError ||
-          error instanceof SsrfBlockedError
-        ) {
+        if (isKnownClusterError(error)) {
           send({ type: "error", message: error.message });
         } else {
           console.error("Cluster generation failed:", error);

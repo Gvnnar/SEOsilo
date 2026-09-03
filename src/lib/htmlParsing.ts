@@ -35,20 +35,33 @@ export interface PageSignal {
   metaDescription: string;
   // <h1>-<h3> text, in document order, trimmed and deduplicated.
   headings: string[];
+  // Visible body text with nav/header/footer/script/etc. stripped out,
+  // preferring <main>/<article> when present - a real excerpt of what the
+  // page actually says, not just its metadata.
+  bodyExcerpt: string;
 }
 
 function normalizeText(text: string): string {
   return text.trim().replace(/\s+/g, " ");
 }
 
+const MAX_BODY_EXCERPT_CHARS = 800;
+
 // Everything on the page worth analyzing beyond the bare title: meta
-// description and the H1-H3 heading structure, which sketch what the page
-// actually covers even when the <title> is generic or SEO-stuffed.
+// description (falling back to Open Graph tags when absent), the H1-H3
+// heading structure, and an excerpt of the actual body copy - together
+// they sketch what the page covers even when the <title> is generic or
+// SEO-stuffed, or the meta description is missing entirely.
 export function extractPageSignal(html: string): PageSignal {
   const $ = cheerio.load(html);
-  const title = normalizeText($("title").first().text());
+
+  const title =
+    normalizeText($("title").first().text()) ||
+    normalizeText($('meta[property="og:title"]').first().attr("content") ?? "");
   const h1 = normalizeText($("h1").first().text());
-  const metaDescription = normalizeText($('meta[name="description"]').first().attr("content") ?? "");
+  const metaDescription =
+    normalizeText($('meta[name="description"]').first().attr("content") ?? "") ||
+    normalizeText($('meta[property="og:description"]').first().attr("content") ?? "");
 
   const seen = new Set<string>();
   const headings: string[] = [];
@@ -60,17 +73,26 @@ export function extractPageSignal(html: string): PageSignal {
     }
   });
 
-  return { title, h1, metaDescription, headings };
+  // Strip boilerplate that repeats on every page (nav, footer, forms, ...)
+  // before pulling body text, or it would dominate the signal instead of
+  // what this specific page is actually about.
+  $("nav, header, footer, script, style, noscript, svg, form, aside, iframe, template").remove();
+  const mainContainer = $("main, article").first();
+  const bodySource = mainContainer.length > 0 ? mainContainer : $("body");
+  const bodyExcerpt = normalizeText(bodySource.text()).slice(0, MAX_BODY_EXCERPT_CHARS);
+
+  return { title, h1, metaDescription, headings, bodyExcerpt };
 }
 
-const MAX_SIGNAL_CHARS = 500;
+const MAX_SIGNAL_CHARS = 1200;
 
 // Builds the compact per-page text actually used for clustering: title,
-// meta description and heading structure joined on one line (never a raw
-// newline - callers place this in a numbered list) and capped in length so
-// one bloated page can't blow up the token cost of a whole crawl.
+// meta description, heading structure and a body excerpt joined on one
+// line (never a raw newline - callers place this in a numbered list) and
+// capped in length so one bloated page can't blow up the token cost of a
+// whole crawl.
 export function buildClusteringText(signal: PageSignal): string {
-  const parts = [signal.title, signal.metaDescription, ...signal.headings]
+  const parts = [signal.title, signal.metaDescription, ...signal.headings, signal.bodyExcerpt]
     .map((p) => p.trim())
     .filter(Boolean);
 

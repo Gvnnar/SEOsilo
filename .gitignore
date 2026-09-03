@@ -20,6 +20,9 @@
 # production
 /build
 
+# MCP server build output (npm run build:mcp)
+/dist
+
 # misc
 .DS_Store
 *.pem
