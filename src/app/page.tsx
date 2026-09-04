@@ -1,0 +1,503 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import type { ClusterInputMode, ClusteringMethod, ClusterResponse, CrawlStreamEvent, PhraseCluster } from "@/lib/types";
+
+// Polish plural rule: 1 -> singular, 2-4 (but not 12-14) -> "few" form,
+// otherwise (0, 5+, 11-14, ...) -> genitive plural.
+function plPlural(n: number, one: string, few: string, many: string): string {
+  if (n === 1) return one;
+  const lastDigit = n % 10;
+  const lastTwo = n % 100;
+  if (lastDigit >= 2 && lastDigit <= 4 && !(lastTwo >= 12 && lastTwo <= 14)) return few;
+  return many;
+}
+
+function parsePhrases(raw: string): string[] {
+  return Array.from(
+    new Set(
+      raw
+        .split(/\r?\n|,/)
+        .map((p) => p.trim())
+        .filter(Boolean),
+    ),
+  );
+}
+
+export default function Home() {
+  const [inputMode, setInputMode] = useState<ClusterInputMode>("phrases");
+  const [phrasesText, setPhrasesText] = useState("");
+  const [pageContext, setPageContext] = useState("");
+  const [siteUrl, setSiteUrl] = useState("");
+  const [method, setMethod] = useState<ClusteringMethod>("lexical");
+  const [aiAvailable, setAiAvailable] = useState<boolean | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [clusters, setClusters] = useState<PhraseCluster[] | null>(null);
+  const [crawlInfo, setCrawlInfo] = useState<ClusterResponse["crawl"] | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [linksCopied, setLinksCopied] = useState(false);
+  const [crawlProgress, setCrawlProgress] = useState<{ message: string; fetched?: number; total?: number } | null>(
+    null,
+  );
+
+  useEffect(() => {
+    fetch("/api/cluster")
+      .then((res) => res.json())
+      .then((data) => {
+        const available = Boolean(data.aiAvailable);
+        setAiAvailable(available);
+        // Embeddings are the sweet spot (fast, cheap, understands synonyms) -
+        // a better default than lexical once it's actually usable.
+        if (available) setMethod("embeddings");
+      })
+      .catch(() => setAiAvailable(false));
+  }, []);
+
+  const phraseCount = parsePhrases(phrasesText).length;
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+
+    setLoading(true);
+    setError(null);
+    setClusters(null);
+    setCrawlInfo(null);
+    setCrawlProgress(null);
+
+    if (inputMode === "crawl") {
+      if (!siteUrl.trim()) {
+        setError("Podaj URL strony głównej.");
+        setLoading(false);
+        return;
+      }
+      await submitCrawl(siteUrl.trim(), method);
+      return;
+    }
+
+    const phrases = parsePhrases(phrasesText);
+    if (phrases.length === 0) {
+      setError("Wklej co najmniej jedną frazę.");
+      setLoading(false);
+      return;
+    }
+    await submitPhrases(phrases, pageContext, method);
+  }
+
+  async function submitPhrases(phrases: string[], pageContext: string, method: ClusteringMethod) {
+    try {
+      const res = await fetch("/api/cluster", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "phrases", phrases, pageContext, method }),
+      });
+      const data: ClusterResponse & { error?: string } = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error ?? "Wystąpił nieznany błąd.");
+      }
+      setClusters(data.clusters);
+      setCrawlInfo(data.crawl ?? null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Wystąpił nieznany błąd.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // Crawl mode streams newline-delimited JSON progress events instead of one
+  // opaque response, since discovering + fetching dozens of pages can take
+  // several seconds - reading response.body incrementally lets the UI show
+  // live progress instead of a blank wait.
+  async function submitCrawl(siteUrl: string, method: ClusteringMethod) {
+    try {
+      const res = await fetch("/api/cluster", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "crawl", siteUrl, method }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error ?? "Wystąpił nieznany błąd.");
+      }
+      if (!res.body) {
+        throw new Error("Serwer nie zwrócił odpowiedzi.");
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let sawDone = false;
+
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const event: CrawlStreamEvent = JSON.parse(line);
+          if (event.type === "status") {
+            setCrawlProgress({ message: event.message, fetched: event.fetched, total: event.total });
+          } else if (event.type === "done") {
+            sawDone = true;
+            setClusters(event.result.clusters);
+            setCrawlInfo(event.result.crawl ?? null);
+          } else if (event.type === "error") {
+            throw new Error(event.message);
+          }
+        }
+      }
+
+      if (!sawDone) {
+        throw new Error("Połączenie przerwane przed ukończeniem grupowania.");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Wystąpił nieznany błąd.");
+    } finally {
+      setLoading(false);
+      setCrawlProgress(null);
+    }
+  }
+
+  async function handleCopyCsv() {
+    if (!clusters) return;
+    const hasPages = clusters.some((c) => c.pages && c.pages.length > 0);
+    const rows = [hasPages ? "Klaster\tFraza główna\tFraza\tURL" : "Klaster\tFraza główna\tFraza"];
+    for (const cluster of clusters) {
+      if (cluster.pages && cluster.pages.length > 0) {
+        for (const page of cluster.pages) {
+          rows.push(`${cluster.name}\t${cluster.mainPhrase}\t${page.phrase}\t${page.url}`);
+        }
+      } else {
+        for (const phrase of cluster.phrases) {
+          rows.push(`${cluster.name}\t${cluster.mainPhrase}\t${phrase}`);
+        }
+      }
+    }
+    await navigator.clipboard.writeText(rows.join("\n"));
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }
+
+  async function handleCopyLinkSuggestions() {
+    if (!clusters) return;
+    const rows = ["Klaster\tOd\tDo\tSugerowany anchor"];
+    for (const cluster of clusters) {
+      for (const link of cluster.linkSuggestions ?? []) {
+        rows.push(`${cluster.name}\t${link.fromUrl}\t${link.toUrl}\t${link.anchor}`);
+      }
+    }
+    await navigator.clipboard.writeText(rows.join("\n"));
+    setLinksCopied(true);
+    setTimeout(() => setLinksCopied(false), 2000);
+  }
+
+  return (
+    <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-8 px-4 py-10 sm:px-6">
+      <header className="flex flex-col gap-2">
+        <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
+          Grupowanie fraz w klastry tematyczne
+        </h1>
+        <p className="text-sm text-black/60 dark:text-white/60">
+          Wklej listę fraz kluczowych albo podaj URL strony głównej - narzędzie pogrupuje je w silosy
+          tematyczne, wskaże frazę główną w każdym klastrze i pomoże zaplanować strukturę treści.
+        </p>
+      </header>
+
+      <form onSubmit={handleSubmit} className="flex flex-col gap-5">
+        <div
+          role="tablist"
+          aria-label="Źródło danych"
+          className="inline-flex w-fit gap-1 rounded-md border border-black/10 p-1 dark:border-white/15"
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={inputMode === "phrases"}
+            onClick={() => setInputMode("phrases")}
+            className={`rounded px-3 py-1.5 text-sm font-medium transition-colors ${
+              inputMode === "phrases"
+                ? "bg-foreground text-background"
+                : "text-black/60 dark:text-white/60"
+            }`}
+          >
+            Wklej frazy
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={inputMode === "crawl"}
+            onClick={() => setInputMode("crawl")}
+            className={`rounded px-3 py-1.5 text-sm font-medium transition-colors ${
+              inputMode === "crawl"
+                ? "bg-foreground text-background"
+                : "text-black/60 dark:text-white/60"
+            }`}
+          >
+            Podaj URL strony
+          </button>
+        </div>
+
+        {inputMode === "phrases" ? (
+          <>
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium">
+                Frazy kluczowe{" "}
+                <span className="text-black/40 dark:text-white/40">(jedna na linię lub po przecinku)</span>
+              </span>
+              <textarea
+                value={phrasesText}
+                onChange={(e) => setPhrasesText(e.target.value)}
+                rows={10}
+                placeholder={"pielęgnacja trawnika\nnawożenie trawnika wiosną\njak często kosić trawnik\n..."}
+                className="rounded-md border border-black/10 bg-transparent p-3 font-mono text-sm outline-none focus:border-black/30 dark:border-white/15 dark:focus:border-white/30"
+              />
+              <span className="text-xs text-black/40 dark:text-white/40">{phraseCount} unikalnych fraz</span>
+            </label>
+
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium">
+                Temat / URL strony <span className="text-black/40 dark:text-white/40">(opcjonalnie)</span>
+              </span>
+              <input
+                type="text"
+                value={pageContext}
+                onChange={(e) => setPageContext(e.target.value)}
+                placeholder="np. https://przyklad.pl/pielegnacja-trawnika lub 'poradnik o pielęgnacji trawnika'"
+                className="rounded-md border border-black/10 bg-transparent p-2.5 text-sm outline-none focus:border-black/30 dark:border-white/15 dark:focus:border-white/30"
+              />
+            </label>
+          </>
+        ) : (
+          <label className="flex flex-col gap-1.5">
+            <span className="text-sm font-medium">URL strony głównej</span>
+            <input
+              type="url"
+              value={siteUrl}
+              onChange={(e) => setSiteUrl(e.target.value)}
+              placeholder="https://przyklad.pl"
+              className="rounded-md border border-black/10 bg-transparent p-2.5 text-sm outline-none focus:border-black/30 dark:border-white/15 dark:focus:border-white/30"
+            />
+            <span className="text-xs text-black/40 dark:text-white/40">
+              Narzędzie samo znajdzie istniejące podstrony (sitemap.xml lub linki ze strony głównej,
+              z poszanowaniem robots.txt) i pogrupuje je wg tytułów w silosy tematyczne.
+            </span>
+          </label>
+        )}
+
+        <fieldset className="flex flex-col gap-2">
+          <legend className="text-sm font-medium">Metoda grupowania</legend>
+          <div className="flex flex-col gap-2 sm:flex-row sm:gap-4">
+            <label className="flex cursor-pointer items-start gap-2 rounded-md border border-black/10 p-3 text-sm dark:border-white/15">
+              <input
+                type="radio"
+                name="method"
+                checked={method === "lexical"}
+                onChange={() => setMethod("lexical")}
+                className="mt-0.5"
+              />
+              <span>
+                <span className="block font-medium">Leksykalne</span>
+                <span className="block text-xs text-black/50 dark:text-white/50">
+                  Wspólne słowa/rdzenie, działa offline, natychmiastowe.
+                </span>
+              </span>
+            </label>
+            <label
+              className={`flex items-start gap-2 rounded-md border border-black/10 p-3 text-sm dark:border-white/15 ${
+                aiAvailable ? "cursor-pointer" : "cursor-not-allowed opacity-50"
+              }`}
+            >
+              <input
+                type="radio"
+                name="method"
+                checked={method === "embeddings"}
+                disabled={!aiAvailable}
+                onChange={() => setMethod("embeddings")}
+                className="mt-0.5"
+              />
+              <span>
+                <span className="block font-medium">Embeddingi (szybkie AI)</span>
+                <span className="block text-xs text-black/50 dark:text-white/50">
+                  {aiAvailable === false
+                    ? "Wymaga ustawienia OPENROUTER_API_KEY na serwerze."
+                    : "Rozumie synonimy i parafrazy, dużo taniej i szybciej niż pełny model czatu."}
+                </span>
+              </span>
+            </label>
+            <label
+              className={`flex items-start gap-2 rounded-md border border-black/10 p-3 text-sm dark:border-white/15 ${
+                aiAvailable ? "cursor-pointer" : "cursor-not-allowed opacity-50"
+              }`}
+            >
+              <input
+                type="radio"
+                name="method"
+                checked={method === "semantic"}
+                disabled={!aiAvailable}
+                onChange={() => setMethod("semantic")}
+                className="mt-0.5"
+              />
+              <span>
+                <span className="block font-medium">Semantyczne (AI)</span>
+                <span className="block text-xs text-black/50 dark:text-white/50">
+                  {aiAvailable === false
+                    ? "Wymaga ustawienia OPENROUTER_API_KEY na serwerze."
+                    : "Najdokładniejsze rozumienie intencji, ale wolniejsze i droższe przy dużych zbiorach."}
+                </span>
+              </span>
+            </label>
+          </div>
+        </fieldset>
+
+        <button
+          type="submit"
+          disabled={loading}
+          className="self-start rounded-md bg-foreground px-5 py-2.5 text-sm font-medium text-background transition-opacity disabled:opacity-50"
+        >
+          {loading ? (inputMode === "crawl" ? "Skanowanie strony..." : "Grupowanie...") : "Pogrupuj"}
+        </button>
+
+        {loading && inputMode === "crawl" && crawlProgress && (
+          <div className="flex flex-col gap-1.5">
+            <p className="text-xs text-black/60 dark:text-white/60">{crawlProgress.message}</p>
+            {crawlProgress.total ? (
+              <div className="h-1.5 w-full overflow-hidden rounded-full bg-black/10 dark:bg-white/10">
+                <div
+                  className="h-full rounded-full bg-foreground transition-all"
+                  style={{ width: `${Math.round(((crawlProgress.fetched ?? 0) / crawlProgress.total) * 100)}%` }}
+                />
+              </div>
+            ) : null}
+          </div>
+        )}
+
+        {error && (
+          <p className="rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-600 dark:text-red-400">
+            {error}
+          </p>
+        )}
+      </form>
+
+      {clusters && (
+        <section className="flex flex-col gap-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h2 className="text-lg font-semibold">
+                {clusters.length} {plPlural(clusters.length, "klaster", "klastry", "klastrów")} tematycznych
+              </h2>
+              {crawlInfo && (
+                <p className="text-xs text-black/50 dark:text-white/50">
+                  Znaleziono {crawlInfo.discovered}{" "}
+                  {plPlural(crawlInfo.discovered, "podstronę", "podstrony", "podstron")}
+                  {crawlInfo.skipped > 0 ? ` (pominięto ${crawlInfo.skipped})` : ""} ·{" "}
+                  {crawlInfo.source === "sitemap" ? "źródło: sitemap.xml" : "źródło: linki ze strony głównej"}
+                </p>
+              )}
+            </div>
+            <div className="flex gap-2">
+              {clusters.some((c) => c.linkSuggestions && c.linkSuggestions.length > 0) && (
+                <button
+                  onClick={handleCopyLinkSuggestions}
+                  className="rounded-md border border-black/10 px-3 py-1.5 text-xs font-medium dark:border-white/15"
+                >
+                  {linksCopied ? "Skopiowano!" : "Kopiuj sugestie linkowania"}
+                </button>
+              )}
+              <button
+                onClick={handleCopyCsv}
+                className="rounded-md border border-black/10 px-3 py-1.5 text-xs font-medium dark:border-white/15"
+              >
+                {copied ? "Skopiowano!" : "Kopiuj jako CSV"}
+              </button>
+            </div>
+          </div>
+
+          {crawlInfo && crawlInfo.duplicateWarnings.length > 0 && (
+            <details className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-amber-700 dark:text-amber-400">
+              <summary className="cursor-pointer text-sm font-medium">
+                ⚠️ Możliwa kanibalizacja treści: {crawlInfo.duplicateWarnings.length}{" "}
+                {plPlural(crawlInfo.duplicateWarnings.length, "para bardzo podobnych stron", "pary bardzo podobnych stron", "par bardzo podobnych stron")}
+              </summary>
+              <ul className="mt-2 flex flex-col gap-1.5 text-xs">
+                {crawlInfo.duplicateWarnings.map((w, i) => (
+                  <li key={i}>
+                    <a href={w.urlA} target="_blank" rel="noreferrer noopener" className="underline">
+                      {w.labelA}
+                    </a>{" "}
+                    ↔{" "}
+                    <a href={w.urlB} target="_blank" rel="noreferrer noopener" className="underline">
+                      {w.labelB}
+                    </a>{" "}
+                    <span className="opacity-70">({Math.round(w.similarity * 100)}% podobieństwa treści)</span>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+
+          <ul className="flex flex-col gap-3">
+            {clusters.map((cluster, i) => (
+              <li key={i} className="rounded-lg border border-black/10 p-4 dark:border-white/15">
+                <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+                  <h3 className="font-semibold">{cluster.name}</h3>
+                  <span className="text-xs text-black/40 dark:text-white/40">
+                    {cluster.phrases.length} {plPlural(cluster.phrases.length, "fraza", "frazy", "fraz")}
+                  </span>
+                </div>
+                <p className="mb-3 text-xs text-black/50 dark:text-white/50">
+                  Fraza główna: <span className="font-medium text-black/80 dark:text-white/80">{cluster.mainPhrase}</span>
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {cluster.pages && cluster.pages.length > 0
+                    ? cluster.pages.map((page, j) => (
+                        <a
+                          key={`${page.url}-${j}`}
+                          href={page.url}
+                          target="_blank"
+                          rel="noreferrer noopener"
+                          title={page.url}
+                          className="rounded-full bg-black/5 px-2.5 py-1 text-xs underline decoration-black/20 hover:bg-black/10 dark:bg-white/10 dark:decoration-white/20 dark:hover:bg-white/15"
+                        >
+                          {page.phrase}
+                        </a>
+                      ))
+                    : cluster.phrases.map((phrase) => (
+                        <span
+                          key={phrase}
+                          className="rounded-full bg-black/5 px-2.5 py-1 text-xs dark:bg-white/10"
+                        >
+                          {phrase}
+                        </span>
+                      ))}
+                </div>
+
+                {cluster.linkSuggestions && cluster.linkSuggestions.length > 0 && (
+                  <details className="mt-3 border-t border-black/10 pt-3 dark:border-white/15">
+                    <summary className="cursor-pointer text-xs font-medium text-black/60 dark:text-white/60">
+                      🔗 Sugerowane linki wewnętrzne ({cluster.linkSuggestions.length})
+                    </summary>
+                    <ul className="mt-2 flex flex-col gap-1 text-xs text-black/60 dark:text-white/60">
+                      {cluster.linkSuggestions.map((link, j) => (
+                        <li key={j}>
+                          <span className="font-medium text-black/80 dark:text-white/80">{link.fromLabel}</span>
+                          {" → "}
+                          <span className="font-medium text-black/80 dark:text-white/80">{link.toLabel}</span>
+                          <span className="opacity-70"> (anchor: „{link.anchor}”)</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+    </div>
+  );
+}
